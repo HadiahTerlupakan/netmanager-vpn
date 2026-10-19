@@ -41,7 +41,7 @@ func (s *Store) CreateHub(h Hub) (Hub, error) {
 		h.PrivateKey, h.APIToken, h.Status, fmtTime(h.JoinExpiresAt), fmtTimePtr(h.LastSeenAt),
 		fmtTime(h.CreatedAt))
 	if err != nil {
-		return Hub{}, err
+		return Hub{}, conflictOr(err)
 	}
 	return s.GetHub(h.ID)
 }

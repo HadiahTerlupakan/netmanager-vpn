@@ -36,7 +36,7 @@ func (s *Store) CreateRouter(r Router) (Router, error) {
 		r.ID, r.Label, r.Ref, r.Address.String(), r.PublicKey, r.PrivateKey, r.Status,
 		fmtTime(r.CreatedAt))
 	if err != nil {
-		return Router{}, err
+		return Router{}, conflictOr(err)
 	}
 	return s.GetRouter(r.ID)
 }
@@ -70,10 +70,12 @@ func (s *Store) ListRouters() ([]Router, error) {
 	return out, rows.Err()
 }
 
-// ClaimRouter marks a pending router as claimed by its device.
+// ClaimRouter marks a pending router as claimed by its device; any other
+// router (already active, released, unknown) yields ErrNotFound.
 func (s *Store) ClaimRouter(id string) error {
 	return affected(s.db.Exec(
-		`UPDATE routers SET status = 'active' WHERE id = ? AND released_at IS NULL`, id))
+		`UPDATE routers SET status = ? WHERE id = ? AND status = ? AND released_at IS NULL`,
+		RouterStatusActive, id, RouterStatusPending))
 }
 
 // DeleteRouter soft-deletes a router: the row stays with released_at set so its
@@ -95,6 +97,27 @@ func (s *Store) DeleteRouter(id string) error {
 	return tx.Commit()
 }
 
+// requireRowsExist rejects a router that is released or unknown and any unknown
+// hub, so no orphan router_hubs row can pin a hub against deletion.
+func requireRowsExist(tx *sql.Tx, routerID string, hubIDs []string) error {
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM routers WHERE id = ? AND released_at IS NULL`, routerID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	for _, hub := range hubIDs {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM hubs WHERE id = ?`, hub).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+	}
+	return nil
+}
+
 // SetRouterHubs replaces the router's ordered hub list (priority is the index).
 // Hubs that stay keep their sync_state; new ones start as "pending".
 func (s *Store) SetRouterHubs(routerID string, hubIDs []string) error {
@@ -103,6 +126,9 @@ func (s *Store) SetRouterHubs(routerID string, hubIDs []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireRowsExist(tx, routerID, hubIDs); err != nil {
+		return err
+	}
 	old := map[string]string{}
 	rows, err := tx.Query(`SELECT hub_id, sync_state FROM router_hubs WHERE router_id = ?`, routerID)
 	if err != nil {
@@ -125,7 +151,7 @@ func (s *Store) SetRouterHubs(routerID string, hubIDs []string) error {
 	for i, hub := range hubIDs {
 		state, ok := old[hub]
 		if !ok {
-			state = "pending"
+			state = SyncStatePending
 		}
 		if _, err := tx.Exec(`INSERT INTO router_hubs (router_id, hub_id, priority, sync_state)
 			VALUES (?,?,?,?)`, routerID, hub, i, state); err != nil {
@@ -226,6 +252,9 @@ func (s *Store) TakenAddresses(kind string) (map[netip.Addr]time.Time, error) {
 			if at, err = parseTime(released.String); err != nil {
 				return nil, err
 			}
+		}
+		if prev, seen := out[addr]; seen && (prev.IsZero() || (!at.IsZero() && at.Before(prev))) {
+			continue
 		}
 		out[addr] = at
 	}

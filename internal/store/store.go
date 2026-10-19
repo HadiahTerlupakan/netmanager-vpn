@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -17,6 +18,9 @@ import (
 var (
 	// ErrNotFound is returned when a row does not exist (or is released).
 	ErrNotFound = errors.New("store: not found")
+	// ErrConflict is returned when a unique constraint rejects an insert, such as
+	// an address already held by a live row.
+	ErrConflict = errors.New("store: conflict")
 	// ErrInUse is returned when a row cannot be deleted because others reference it.
 	ErrInUse = errors.New("store: in use")
 )
@@ -58,6 +62,7 @@ var migrations = []string{
 		created_at TEXT NOT NULL,
 		released_at TEXT
 	);
+	CREATE UNIQUE INDEX routers_live_address ON routers (address) WHERE released_at IS NULL;
 	CREATE TABLE router_hubs (
 		router_id TEXT NOT NULL,
 		hub_id TEXT NOT NULL,
@@ -128,6 +133,9 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
 		return fmt.Errorf("store: read version: %w", err)
 	}
+	if current > len(migrations) {
+		return fmt.Errorf("store: database schema version %d is newer than this build knows (%d)", current, len(migrations))
+	}
 	for i := current; i < len(migrations); i++ {
 		if err := s.applyMigration(i+1, migrations[i]); err != nil {
 			return err
@@ -187,6 +195,15 @@ func parseTimePtr(ns sql.NullString) (*time.Time, error) {
 }
 
 func parseAddr(s string) (netip.Addr, error) { return netip.ParseAddr(s) }
+
+// conflictOr maps a unique-constraint violation to ErrConflict so callers can
+// tell a collision from an I/O failure.
+func conflictOr(err error) error {
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return ErrConflict
+	}
+	return err
+}
 
 // affected maps a zero-row UPDATE/DELETE to ErrNotFound.
 func affected(res sql.Result, err error) error {

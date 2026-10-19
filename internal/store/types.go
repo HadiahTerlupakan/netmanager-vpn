@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+// Status and sync-state values stored in the database.
+const (
+	RouterStatusPending = "pending"
+	RouterStatusActive  = "active"
+
+	SyncStatePending = "pending"
+	SyncStateSynced  = "synced"
+
+	HubStatusPendingInstall = "pending_install"
+	HubStatusOnline         = "online"
+	HubStatusOffline        = "offline"
+	HubStatusExpired        = "expired"
+)
+
 // Hub is a regional hub as seen by the core.
 type Hub struct {
 	ID            string

@@ -9,7 +9,7 @@ func (s *Store) CreateAdminPeer(p AdminPeer) (AdminPeer, error) {
 	_, err := s.db.Exec(`INSERT INTO admin_peers (id, label, address, public_key, private_key, created_at)
 		VALUES (?,?,?,?,?,?)`, p.ID, p.Label, p.Address.String(), p.PublicKey, p.PrivateKey,
 		fmtTime(p.CreatedAt))
-	return p, err
+	return p, conflictOr(err)
 }
 
 // ListAdminPeers returns all admin peers, oldest first.
