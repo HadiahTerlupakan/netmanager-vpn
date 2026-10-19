@@ -1,0 +1,9 @@
+table inet netmanager_vpn
+flush table inet netmanager_vpn
+table inet netmanager_vpn {
+	chain input {
+		type filter hook input priority 0; policy accept;
+		tcp dport 7480 ip saddr { 127.0.0.1, 10.42.0.0/16 } accept
+		tcp dport 7480 drop
+	}
+}

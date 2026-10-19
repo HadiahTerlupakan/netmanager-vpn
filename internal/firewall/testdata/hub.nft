@@ -1,0 +1,20 @@
+table inet netmanager_vpn
+flush table inet netmanager_vpn
+table inet netmanager_vpn {
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "wg-nm" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
+		iifname "wg-nm" drop
+		iifname "wg-up" oifname "wg-nm" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
+		iifname "wg-up" oifname "wg-nm" drop
+	}
+	chain input {
+		type filter hook input priority 0; policy accept;
+		iifname "wg-up" ip saddr 10.99.0.1 tcp dport 7480 accept
+		tcp dport 7480 drop
+		iifname "wg-nm" icmp type echo-request accept
+		iifname "wg-nm" drop
+	}
+}
