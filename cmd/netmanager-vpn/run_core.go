@@ -38,7 +38,8 @@ func runCore(ctx context.Context, cfg config) error {
 	if err := c.Init(); err != nil {
 		return err
 	}
-	if err := firewall.NewNft().Apply(firewall.RenderCore()); err != nil {
+	fw, ipt := firewall.NewNft(), firewall.NewIPTables()
+	if err := firewall.ApplyCore(fw, ipt); err != nil {
 		return fmt.Errorf("firewall: %w", err)
 	}
 	go c.RunActiveLoop(ctx, activeInterval)

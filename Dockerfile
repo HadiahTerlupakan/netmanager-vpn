@@ -8,7 +8,9 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/netmanager-vpn ./cmd/netmanager-vpn
 
 FROM alpine:3.22
-RUN apk add --no-cache nftables ca-certificates
+# iptables only reaches Docker's DOCKER-USER chain on hosts that run Docker;
+# our own rules stay in nftables.
+RUN apk add --no-cache nftables iptables ca-certificates
 COPY --from=build /out/netmanager-vpn /usr/local/bin/netmanager-vpn
 # Runs as root on purpose: it creates WireGuard links and loads nftables rules
 # in the host network namespace (hostNetwork / --network host), which needs

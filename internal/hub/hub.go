@@ -30,10 +30,12 @@ const (
 // coreAllowedIPs are the backhaul and admin subnets reachable through the core.
 var coreAllowedIPs = []string{"10.99.0.0/24", "10.99.128.0/24"}
 
-// Options override the clock and the sysctl writer; zero values use the real ones.
+// Options override the clock, the sysctl writer and iptables; zero values use
+// the real ones.
 type Options struct {
-	Now    func() time.Time
-	Sysctl func(key, value string) error
+	Now      func() time.Time
+	Sysctl   func(key, value string) error
+	IPTables firewall.IPTables
 }
 
 // Service owns the hub's configuration and keeps the kernel in line with it.
@@ -41,6 +43,7 @@ type Service struct {
 	dev    wgdevice.Device
 	st     *store.Store
 	fw     firewall.Applier
+	ipt    firewall.IPTables
 	box    *secret.Box
 	now    func() time.Time
 	sysctl func(string, string) error
@@ -59,12 +62,15 @@ type PeerStatus struct {
 
 // New builds a Service.
 func New(dev wgdevice.Device, st *store.Store, fw firewall.Applier, box *secret.Box, opts Options) *Service {
-	s := &Service{dev: dev, st: st, fw: fw, box: box, now: opts.Now, sysctl: opts.Sysctl}
+	s := &Service{dev: dev, st: st, fw: fw, ipt: opts.IPTables, box: box, now: opts.Now, sysctl: opts.Sysctl}
 	if s.now == nil {
 		s.now = time.Now
 	}
 	if s.sysctl == nil {
 		s.sysctl = writeSysctl
+	}
+	if s.ipt == nil {
+		s.ipt = firewall.NewIPTables()
 	}
 	return s
 }
@@ -121,6 +127,9 @@ func (s *Service) reconcile() error {
 	}
 	if err := s.fw.Apply(firewall.RenderHub()); err != nil {
 		return fmt.Errorf("hub: apply firewall: %w", err)
+	}
+	if err := firewall.EnsureDockerUserAccepts(s.ipt, firewall.HubDockerAccepts); err != nil {
+		return fmt.Errorf("hub: docker forward accepts: %w", err)
 	}
 	if err := s.sysctl(ipForwardKey, "1"); err != nil {
 		return fmt.Errorf("hub: enable forwarding: %w", err)

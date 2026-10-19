@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,11 +40,20 @@ type fakeFW struct{ rules string }
 
 func (f *fakeFW) Apply(s string) error { f.rules = s; return nil }
 
+// fakeIPTables has a DOCKER-USER chain, as every hub with Docker does.
+type fakeIPTables struct{ calls [][]string }
+
+func (f *fakeIPTables) Run(args ...string) (bool, error) {
+	f.calls = append(f.calls, args)
+	return args[0] != "-C", nil
+}
+
 type env struct {
 	svc     *Service
 	st      *store.Store
 	dev     *recorder
 	fw      *fakeFW
+	ipt     *fakeIPTables
 	sysctls map[string]string
 	now     time.Time
 }
@@ -59,11 +69,12 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{st: st, dev: newRecorder(), fw: &fakeFW{}, sysctls: map[string]string{},
+	e := &env{st: st, dev: newRecorder(), fw: &fakeFW{}, ipt: &fakeIPTables{}, sysctls: map[string]string{},
 		now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
 	e.svc = New(e.dev, st, e.fw, box, Options{
-		Now:    func() time.Time { return e.now },
-		Sysctl: func(k, v string) error { e.sysctls[k] = v; return nil },
+		Now:      func() time.Time { return e.now },
+		Sysctl:   func(k, v string) error { e.sysctls[k] = v; return nil },
+		IPTables: e.ipt,
 	})
 	return e
 }
@@ -96,6 +107,16 @@ func TestReconcileBuildsBothInterfaces(t *testing.T) {
 	}
 	if e.fw.rules == "" || e.sysctls["net.ipv4.ip_forward"] != "1" {
 		t.Fatalf("firewall %q sysctl %v", e.fw.rules, e.sysctls)
+	}
+	var inserted []string
+	for _, c := range e.ipt.calls {
+		if c[0] == "-I" {
+			inserted = append(inserted, strings.Join(c, " "))
+		}
+	}
+	if len(inserted) < 2 || inserted[0] != "-I DOCKER-USER -i wg-nm -o wg-up -j ACCEPT" ||
+		inserted[1] != "-I DOCKER-USER -i wg-up -o wg-nm -j ACCEPT" {
+		t.Fatalf("DOCKER-USER accepts not requested: %v", inserted)
 	}
 }
 
