@@ -219,48 +219,30 @@ func parseAllowedIPs(entries []string) ([]net.IPNet, error) {
 	return allowed, nil
 }
 
-// syncRoutes makes the routing table match the peers. The kernel's allowed-ips
-// do not create routes by themselves, and a route left behind by a deleted peer
-// would blackhole that subnet.
+// syncRoutes makes the routing table match the peers, as planRoutes decides.
 func syncRoutes(link netlink.Link, cfg Config) error {
-	wanted := make(map[string]*net.IPNet)
-	for _, peer := range cfg.Peers {
-		for _, entry := range peer.AllowedIPs {
-			_, network, err := net.ParseCIDR(entry)
-			if err != nil {
-				return fmt.Errorf("parse route %s: %w", entry, err)
-			}
-			wanted[network.String()] = network
-		}
-	}
-
-	// The kernel installs a connected route for the interface's own address
-	// when the link comes up. It belongs to no peer and must survive, or the
-	// VPS loses its route to every peer's tunnel address.
-	_, connected, err := net.ParseCIDR(cfg.Address)
-	if err != nil {
-		return fmt.Errorf("parse interface address %s: %w", cfg.Address, err)
-	}
-
 	existing, err := netlink.RouteList(link, netlink.FAMILY_V4)
 	if err != nil {
 		return fmt.Errorf("list routes: %w", err)
 	}
+	dsts := make([]*net.IPNet, 0, len(existing))
+	for _, route := range existing {
+		dsts = append(dsts, route.Dst)
+	}
+	add, stale, err := planRoutes(cfg, dsts)
+	if err != nil {
+		return err
+	}
 	for i := range existing {
 		route := existing[i]
-		if route.Dst == nil || route.Dst.String() == connected.String() {
-			continue
-		}
-		if _, keep := wanted[route.Dst.String()]; keep {
-			delete(wanted, route.Dst.String())
+		if route.Dst == nil || !stale[route.Dst.String()] {
 			continue
 		}
 		if err := netlink.RouteDel(&route); err != nil {
 			return fmt.Errorf("remove stale route %s: %w", route.Dst, err)
 		}
 	}
-
-	for _, network := range wanted {
+	for _, network := range add {
 		route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: network}
 		if err := netlink.RouteAdd(route); err != nil {
 			// Deliberately not RouteReplace: a peer subnet that collides with an
