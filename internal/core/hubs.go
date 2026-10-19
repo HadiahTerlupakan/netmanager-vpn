@@ -240,7 +240,7 @@ func (c *Core) finishJoin(hub store.Hub, cred hubCredentials) (string, error) {
 	b := joinbundle.Bundle{CoreEndpoint: c.cfg.CoreEndpoint, CorePublicKey: corePriv.PublicKey().String(),
 		BackhaulAddr: hub.BackhaulAddr.String(), ListenPort: hub.ListenPort, PrivateKey: cred.private, APIToken: cred.token,
 		ExpiresAt: hub.JoinExpiresAt}
-	return fmt.Sprintf("curl -fsSL %s | sudo NMVPN_IMAGE=%s sh -s -- %s", c.cfg.InstallURL, c.cfg.HubImage, b.Encode()), nil
+	return c.hubCommand(b.Encode()), nil
 }
 
 func validateHub(name, host string, port int) error {

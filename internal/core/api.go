@@ -23,6 +23,7 @@ func (c *Core) Handler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/hubs", c.listHubs)
 	mux.HandleFunc("POST /v1/hubs", c.createHub)
 	mux.HandleFunc("POST /v1/hubs/{id}/reissue", c.reissueHub)
+	mux.HandleFunc("GET /v1/hubs/{id}/upgrade-command", c.hubUpgradeCommand)
 	mux.HandleFunc("DELETE /v1/hubs/{id}", c.deleteHub)
 	mux.HandleFunc("POST /v1/routers", c.createRouter)
 	mux.HandleFunc("GET /v1/routers/{id}", c.getRouter)
@@ -144,6 +145,15 @@ func (c *Core) createHub(w http.ResponseWriter, r *http.Request) {
 func (c *Core) reissueHub(w http.ResponseWriter, r *http.Request) {
 	cmd, err := c.ReissueJoin(r.PathValue("id"))
 	reply(w, r, map[string]string{"installCommand": cmd}, err)
+}
+
+func (c *Core) hubUpgradeCommand(w http.ResponseWriter, r *http.Request) {
+	cmd, err := c.UpgradeCommand(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeText(w, cmd)
 }
 
 func (c *Core) deleteHub(w http.ResponseWriter, r *http.Request) {

@@ -32,5 +32,20 @@ if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "Bundle"; then
   fail=1
 fi
 
+# No hub has been installed on the test machine, so upgrade must refuse.
+out=$(NMVPN_IMAGE=example/img:tag-1 sh "$script" upgrade 2>&1)
+status=$?
+if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "Hub belum terpasang"; then
+  echo "FAIL: upgrade without an installed hub not rejected (status $status): $out"
+  fail=1
+fi
+
+out=$(env -u NMVPN_IMAGE sh "$script" upgrade 2>&1)
+status=$?
+if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "NMVPN_IMAGE"; then
+  echo "FAIL: upgrade without NMVPN_IMAGE not rejected (status $status): $out"
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "install-hub tests passed"
 exit "$fail"
