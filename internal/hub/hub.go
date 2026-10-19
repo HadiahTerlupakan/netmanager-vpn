@@ -97,6 +97,10 @@ func (s *Service) Join(b joinbundle.Bundle) error {
 func (s *Service) Reconcile() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.reconcile()
+}
+
+func (s *Service) reconcile() error {
 	cfg, err := s.st.LoadHubConfig()
 	if err != nil {
 		return fmt.Errorf("hub: load config: %w", err)
@@ -150,20 +154,38 @@ func nmConfig(cfg store.HubConfig, key string, peers []store.Peer) wgdevice.Conf
 	return c
 }
 
-// UpsertPeer records a router and applies it.
+// ErrAddressInUse means another public key already holds the address; the
+// kernel would give it to only one of them and black-hole the other.
+var ErrAddressInUse = errors.New("hub: address already held by another peer")
+
+// UpsertPeer records a router and applies it. The check and the write share
+// one lock so two concurrent requests cannot both claim an address.
 func (s *Service) UpsertPeer(pub string, addr netip.Addr) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	peers, err := s.st.ListPeers()
+	if err != nil {
+		return err
+	}
+	for _, p := range peers {
+		if p.Address == addr && p.PublicKey != pub {
+			return ErrAddressInUse
+		}
+	}
 	if err := s.st.UpsertPeer(store.Peer{PublicKey: pub, Address: addr}); err != nil {
 		return err
 	}
-	return s.Reconcile()
+	return s.reconcile()
 }
 
 // DeletePeer removes a router and applies the change.
 func (s *Service) DeletePeer(pub string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.st.DeletePeer(pub); err != nil {
 		return err
 	}
-	return s.Reconcile()
+	return s.reconcile()
 }
 
 // PeerStatuses lists stored peers with the kernel's counters; a peer the

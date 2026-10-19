@@ -3,6 +3,8 @@ package hub
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/ipam"
 )
+
+const maxBodyBytes = 4 << 10
 
 type putPeerRequest struct {
 	Address string `json:"address"`
@@ -33,8 +37,8 @@ func authenticate(token string, next http.Handler) http.Handler {
 	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {
-			got := []byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-			if len(want) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
+			got, hasPrefix := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !hasPrefix || len(want) == 0 || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -44,12 +48,14 @@ func authenticate(token string, next http.Handler) http.Handler {
 }
 
 func validKey(w http.ResponseWriter, r *http.Request) (string, bool) {
-	pub := r.PathValue("pub")
-	if _, err := wgtypes.ParseKey(pub); err != nil {
+	key, err := wgtypes.ParseKey(r.PathValue("pub"))
+	if err != nil {
 		http.Error(w, "invalid public key", http.StatusBadRequest)
 		return "", false
 	}
-	return pub, true
+	// Non-canonical base64 decodes to the same key; storing the canonical
+	// form keeps one peer from appearing under two spellings.
+	return key.String(), true
 }
 
 func (s *Service) putPeer(w http.ResponseWriter, r *http.Request) {
@@ -58,17 +64,21 @@ func (s *Service) putPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body putPeerRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 	addr, err := netip.ParseAddr(body.Address)
-	if err != nil || !ipam.RouterPool.Contains(addr) {
+	if err != nil || !usableRouterAddr(addr) {
 		http.Error(w, "address outside the router pool", http.StatusBadRequest)
 		return
 	}
 	if err := s.UpsertPeer(pub, addr); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, ErrAddressInUse) {
+			writeError(w, http.StatusConflict, "address_in_use")
+			return
+		}
+		internalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -80,7 +90,7 @@ func (s *Service) deletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.DeletePeer(pub); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -89,9 +99,39 @@ func (s *Service) deletePeer(w http.ResponseWriter, r *http.Request) {
 func (s *Service) listPeers(w http.ResponseWriter, _ *http.Request) {
 	statuses, err := s.PeerStatuses()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(statuses)
+}
+
+// usableRouterAddr excludes the pool's network and broadcast addresses, which
+// no router can be given.
+func usableRouterAddr(a netip.Addr) bool {
+	if !ipam.RouterPool.Contains(a) {
+		return false
+	}
+	return a != ipam.RouterPool.Masked().Addr() && a != lastAddr(ipam.RouterPool)
+}
+
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().As4()
+	host := 32 - p.Bits()
+	for i := 0; i < host; i++ {
+		b[3-i/8] |= 1 << (i % 8)
+	}
+	return netip.AddrFrom4(b)
+}
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// internalError hides the cause from the caller; it may name paths or keys.
+func internalError(w http.ResponseWriter, err error) {
+	slog.Error("hub api", "err", err)
+	writeError(w, http.StatusInternalServerError, "internal")
 }

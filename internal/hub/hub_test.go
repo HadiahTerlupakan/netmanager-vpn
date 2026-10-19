@@ -143,3 +143,26 @@ func TestPeerStatusesJoinsStoredAddress(t *testing.T) {
 		t.Fatalf("statuses = %+v", got)
 	}
 }
+
+func TestUpsertPeerRejectsAddressHeldByOtherKey(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Join(e.bundle()); err != nil {
+		t.Fatal(err)
+	}
+	a := netip.MustParseAddr("10.100.0.10")
+	if err := e.svc.UpsertPeer("keyA", a); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.UpsertPeer("keyA", a); err != nil {
+		t.Fatalf("same key and address must stay idempotent: %v", err)
+	}
+	if err := e.svc.UpsertPeer("keyB", a); !errors.Is(err, ErrAddressInUse) {
+		t.Fatalf("err = %v", err)
+	}
+	if err := e.svc.UpsertPeer("keyA", netip.MustParseAddr("10.100.0.11")); err != nil {
+		t.Fatalf("same key, new address: %v", err)
+	}
+	if err := e.svc.UpsertPeer("keyB", a); err != nil {
+		t.Fatalf("freed address: %v", err)
+	}
+}
