@@ -23,6 +23,10 @@ const (
 	apiTokenBytes  = 32
 )
 
+// A hostname needs a letter so that a mistyped address such as 999.1.1.1 is
+// not taken for a name.
+var hasLetterRE = regexp.MustCompile(`[A-Za-z]`)
+
 var hostnameRE = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
 // HubView is a hub as shown to operators.
@@ -252,7 +256,7 @@ func validateHub(name, host string, port int) error {
 		}
 		return nil
 	}
-	if len(host) > 253 || !hostnameRE.MatchString(host) {
+	if len(host) > 253 || !hostnameRE.MatchString(host) || !hasLetterRE.MatchString(host) {
 		return fmt.Errorf("%w: public host must be a hostname or IP without scheme or port", ErrValidation)
 	}
 	return nil

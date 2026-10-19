@@ -3,6 +3,7 @@ package routeros
 import (
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -124,17 +125,80 @@ func TestRenderSetsPrivateKeyOnlyWhenChanged(t *testing.T) {
 	}
 }
 
-func TestRenderPutsRulesFirst(t *testing.T) {
+func TestRenderCreatesRulesAtTheTop(t *testing.T) {
 	out := RenderFull(testInput())
 	route := strings.Index(out, "/ip route")
 	for _, s := range []string{"10.99.0.0/24", "10.99.128.0/24"} {
-		sel := `[/routing rule find comment="netmanager-vpn" dst-address=` + s + `]`
-		place := strings.Index(out, `:if ([:len `+sel+`] = 0) do={ :if ([:len [/routing rule find]] = 0) do={ /routing rule add dst-address=`+s)
-		before := strings.Index(out, "place-before=([/routing rule find]->0)")
-		move := strings.Index(out, "/routing rule move [find "+sel[len("[/routing rule find "):len(sel)-1]+"] destination=([/routing rule find]->0)")
-		if place < 0 || before < 0 || move < 0 || place > route || move > route {
-			t.Errorf("%s: place=%d place-before=%d move=%d route=%d", s, place, before, move, route)
+		add := strings.Index(out, `:if ([:len [/routing rule find comment="netmanager-vpn" dst-address=`+s+`]] = 0) do={ :if ([:len [/routing rule find]] = 0) do={ /routing rule add dst-address=`+s)
+		if add < 0 || add > route {
+			t.Errorf("%s: guarded add at %d, first route at %d", s, add, route)
 		}
+	}
+	if !strings.Contains(out, "place-before=([/routing rule find]->0)") {
+		t.Error("new rules are not placed before the existing ones")
+	}
+}
+
+// Each of our rules is moved directly above the first foreign rule when that
+// rule sits higher. The target is never one of ours, so it cannot be a
+// self-move, and once both have run no foreign rule is above either of ours.
+func TestRenderReordersAboveFirstForeignRule(t *testing.T) {
+	out := RenderFull(testInput())
+	route := strings.Index(out, "/ip route")
+	for _, s := range []string{"10.99.0.0/24", "10.99.128.0/24"} {
+		want := `{ :local foreign [/routing rule find where comment!="netmanager-vpn"]; ` +
+			`:if ([:len $foreign] > 0) do={ :local all [/routing rule find]; ` +
+			`:local f ($foreign->0); :local r ([/routing rule find comment="netmanager-vpn" dst-address=` + s + `]->0); ` +
+			`:if ([:find $all $f] < [:find $all $r]) do={ /routing rule move $r destination=$f } } }`
+		at := strings.Index(out, want)
+		if at < 0 || at > route {
+			t.Errorf("%s: reorder line missing or after routes (at=%d route=%d)", s, at, route)
+		}
+	}
+}
+
+// moveAboveFirstForeign models the rendered reorder line on a rule list.
+func moveAboveFirstForeign(list []string, ours string) []string {
+	idx := func(v string) int { return slices.Index(list, v) }
+	f := slices.IndexFunc(list, func(v string) bool { return !strings.HasPrefix(v, "R") })
+	if f < 0 || f > idx(ours) {
+		return list
+	}
+	out := slices.Delete(slices.Clone(list), idx(ours), idx(ours)+1)
+	return slices.Insert(out, f, ours)
+}
+
+func TestRuleReorderModel(t *testing.T) {
+	for _, tc := range []struct{ in, want []string }{
+		{[]string{"Z", "R128", "R0", "X"}, []string{"R0", "R128", "Z", "X"}},
+		{[]string{"X", "R128", "R0"}, []string{"R0", "R128", "X"}},
+		{[]string{"X", "R0", "R128"}, []string{"R0", "R128", "X"}},
+		{[]string{"R128", "R0", "X"}, []string{"R128", "R0", "X"}},
+		{[]string{"R0", "R128"}, []string{"R0", "R128"}},
+	} {
+		got := tc.in
+		for _, ours := range []string{"R0", "R128"} {
+			got = moveAboveFirstForeign(got, ours)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%v: got %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRenderGivesNewPeerTheGrace(t *testing.T) {
+	stamp := ":global nmVpnSwitchAt; :set nmVpnSwitchAt [/system resource get uptime]"
+	var add, move bool
+	for _, line := range lines(RenderFull(testInput())) {
+		if strings.Contains(line, "/interface wireguard peers add") {
+			add = strings.Contains(line, stamp)
+		}
+		if strings.HasPrefix(line, "{ :local id") {
+			move = strings.Contains(line, stamp)
+		}
+	}
+	if !add || !move {
+		t.Fatalf("grace not started on paste (add=%v move=%v)", add, move)
 	}
 }
 
@@ -226,6 +290,8 @@ func TestValidateRejectsBadInput(t *testing.T) {
 		"host and port": func(in *Input) { in.Servers[0].Host = "hub-a.example.net:51821" },
 		"ipv6 host":     func(in *Input) { in.Servers[0].Host = "2001:db8::1" },
 		"bad label":     func(in *Input) { in.Servers[0].Host = "-hub.example.net" },
+		"not an ip":     func(in *Input) { in.Servers[0].Host = "999.1.1.1" },
+		"short dotted":  func(in *Input) { in.Servers[0].Host = "1.2.3" },
 		"pipe in key":   func(in *Input) { in.Servers[1].PublicKey = "a|b" },
 	}
 	for name, mutate := range cases {

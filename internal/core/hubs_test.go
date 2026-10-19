@@ -153,6 +153,8 @@ func TestCreateHubValidation(t *testing.T) {
 		{"x", "https://h.example.com", 0},
 		{"x", "h.example.com:51821", 0},
 		{"x", "bad host", 0},
+		{"x", "999.1.1.1", 0},
+		{"x", "1.2.3", 0},
 		{"x", "h.example.com", 70000},
 		{"x", "h.example.com", -1},
 	} {

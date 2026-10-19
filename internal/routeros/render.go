@@ -40,7 +40,11 @@ const (
 	sep = "|"
 )
 
-// hostnameRE is the core's rule for a hub's public host (internal/core).
+// hostnameRE and hasLetterRE are the core's rule for a hub's public host
+// (internal/core). A hostname needs a letter so that a mistyped address such
+// as 999.1.1.1 is not taken for a name.
+var hasLetterRE = regexp.MustCompile(`[A-Za-z]`)
+
 var hostnameRE = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
 var subnets = []string{"10.99.0.0/24", "10.99.128.0/24"}
@@ -74,7 +78,7 @@ func validHost(h string) bool {
 	if ip, err := netip.ParseAddr(h); err == nil {
 		return ip.Is4()
 	}
-	return len(h) <= 253 && hostnameRE.MatchString(h)
+	return len(h) <= 253 && hostnameRE.MatchString(h) && hasLetterRE.MatchString(h)
 }
 
 // RenderFull returns the whole script: loopback, tunnel on Servers[0],
@@ -111,23 +115,34 @@ func RenderFull(in Input) string {
 // session the paste is arriving through.
 func writePeer(b *strings.Builder, in Input) {
 	first := in.Servers[0]
-	ensure(b, "/interface wireguard peers", "interface="+ifaceName,
-		fmt.Sprintf("interface=%s public-key=%s endpoint-address=%s endpoint-port=%d",
-			ifaceName, str(first.PublicKey), str(first.Host), first.Port),
-		fmt.Sprintf("allowed-address=%s persistent-keepalive=%s comment=%s", allowed, keepalive, str(tag)))
+	sel := "interface=" + ifaceName
+	update := fmt.Sprintf("allowed-address=%s persistent-keepalive=%s comment=%s", allowed, keepalive, str(tag))
+	endpoint := fmt.Sprintf("endpoint-address=%s endpoint-port=%d public-key=%s", str(first.Host), first.Port, str(first.PublicKey))
+	fmt.Fprintf(b, ":if ([:len [/interface wireguard peers find %s]] = 0) do={ /interface wireguard peers add %s %s %s; %s }\n",
+		sel, sel, endpoint, update, stampSwitch)
+	fmt.Fprintf(b, "/interface wireguard peers set [find %s] %s\n", sel, update)
 	get := func(prop string) string { return "[/interface wireguard peers get $id " + prop + "]" }
-	fmt.Fprintf(b, "{ :local id ([/interface wireguard peers find interface=%s]->0); "+
+	fmt.Fprintf(b, "{ :local id ([/interface wireguard peers find %s]->0); "+
 		":local cur ([:tostr %s] . \"|\" . %s . \"|\" . %s); :local list {%s}; "+
-		":if ([:typeof [:find $list $cur]] != \"num\") do={ /interface wireguard peers set $id endpoint-address=%s endpoint-port=%d public-key=%s } }\n",
-		ifaceName, get("endpoint-address"), get("endpoint-port"), get("public-key"), serverList(in),
-		str(first.Host), first.Port, str(first.PublicKey))
+		":if ([:typeof [:find $list $cur]] != \"num\") do={ /interface wireguard peers set $id %s; %s } }\n",
+		sel, get("endpoint-address"), get("endpoint-port"), get("public-key"), serverList(in),
+		endpoint, stampSwitch)
 }
+
+// stampSwitch starts the switch script's post-switch grace, so a peer that
+// the paste just created or moved is not failed over before the core has
+// followed it to its hub.
+const stampSwitch = ":global nmVpnSwitchAt; :set nmVpnSwitchAt [/system resource get uptime]"
 
 // writeRules puts our rules ahead of the operator's: rules are matched in
 // order, so an earlier operator rule (policy routing to a WAN table) would
 // otherwise take the backhaul traffic. place-before needs an existing rule to
-// point at, hence the empty-table branch. A rule is moved only when it sits
-// below our own rules, so a re-paste leaves an already-correct order alone.
+// point at, hence the empty-table branch.
+//
+// On a re-paste each of our rules moves directly above the first foreign rule
+// when that rule sits higher. The destination is never one of ours, so the
+// move cannot target itself, and after both lines no foreign rule is above
+// either of ours; an order that is already right is left alone.
 func writeRules(b *strings.Builder) {
 	update := "action=lookup-only-in-table table=" + tableName + " comment=" + str(tag)
 	for _, s := range subnets {
@@ -136,10 +151,12 @@ func writeRules(b *strings.Builder) {
 			sel, s, update, s, update)
 		fmt.Fprintf(b, "/routing rule set [find %s] %s\n", sel, update)
 	}
-	for i := len(subnets) - 1; i >= 0; i-- {
-		sel := "comment=" + str(tag) + " dst-address=" + subnets[i]
-		fmt.Fprintf(b, ":if ([:find [/routing rule find] ([/routing rule find %s]->0)] >= %d) do={ /routing rule move [find %s] destination=([/routing rule find]->0) }\n",
-			sel, len(subnets), sel)
+	for _, s := range subnets {
+		fmt.Fprintf(b, "{ :local foreign [/routing rule find where comment!=%s]; "+
+			":if ([:len $foreign] > 0) do={ :local all [/routing rule find]; "+
+			":local f ($foreign->0); :local r ([/routing rule find comment=%s dst-address=%s]->0); "+
+			":if ([:find $all $f] < [:find $all $r]) do={ /routing rule move $r destination=$f } } }\n",
+			str(tag), str(tag), s)
 	}
 }
 
