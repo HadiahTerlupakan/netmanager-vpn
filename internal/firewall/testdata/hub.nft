@@ -5,6 +5,7 @@ table inet netmanager_vpn {
 		type filter hook forward priority 0; policy accept;
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
 		iifname "wg-nm" tcp flags & (syn | ack) == syn drop
 		iifname "wg-nm" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
 		iifname "wg-nm" drop

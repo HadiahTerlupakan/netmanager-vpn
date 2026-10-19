@@ -67,3 +67,14 @@ func TestHubDropsRouterInitiatedTCP(t *testing.T) {
 		t.Fatalf("bare-SYN drop must precede the sport accept (drop=%d accept=%d)", drop, accept)
 	}
 }
+
+// An admin pinging a router gets its echo-reply back through wg-nm; without
+// this the catch-all wg-nm drop eats it.
+func TestHubPassesEchoReplyToAdmins(t *testing.T) {
+	rs := RenderHub()
+	reply := strings.Index(rs, `iifname "wg-nm" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept`)
+	drop := strings.Index(rs, `iifname "wg-nm" drop`)
+	if reply < 0 || reply > drop {
+		t.Fatalf("echo-reply to admins must be accepted before the wg-nm drop (reply=%d drop=%d)", reply, drop)
+	}
+}
