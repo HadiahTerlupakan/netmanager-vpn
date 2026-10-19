@@ -105,6 +105,8 @@ var migrations = []string{
 	// The hub carrying each router outlives a core restart; without it the
 	// first apply after boot would unroute every router until the next pass.
 	`ALTER TABLE routers ADD COLUMN active_hub_id TEXT;`,
+	// A hub that joined before the port was carried listened on the default.
+	`ALTER TABLE hub_config ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 51821;`,
 }
 
 // Open opens (creating if needed) the database at path and applies pending

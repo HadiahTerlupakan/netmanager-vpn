@@ -13,12 +13,14 @@ import (
 // Bundle carries everything a hub needs to join. A single key serves both of
 // the hub's interfaces because the core stores one public key per hub.
 type Bundle struct {
-	CoreEndpoint  string    `json:"coreEndpoint"`
-	CorePublicKey string    `json:"corePublicKey"`
-	BackhaulAddr  string    `json:"backhaulAddr"`
-	PrivateKey    string    `json:"privateKey"`
-	APIToken      string    `json:"apiToken"`
-	ExpiresAt     time.Time `json:"expiresAt"`
+	CoreEndpoint  string `json:"coreEndpoint"`
+	CorePublicKey string `json:"corePublicKey"`
+	BackhaulAddr  string `json:"backhaulAddr"`
+	// ListenPort is wg-nm's port; zero in a bundle issued before it was carried.
+	ListenPort int       `json:"listenPort,omitempty"`
+	PrivateKey string    `json:"privateKey"`
+	APIToken   string    `json:"apiToken"`
+	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
 // Encode returns the bundle as unpadded base64url JSON, safe to paste into a shell.

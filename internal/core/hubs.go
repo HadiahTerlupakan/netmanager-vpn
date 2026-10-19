@@ -238,7 +238,7 @@ func (c *Core) finishJoin(hub store.Hub, cred hubCredentials) (string, error) {
 		return "", err
 	}
 	b := joinbundle.Bundle{CoreEndpoint: c.cfg.CoreEndpoint, CorePublicKey: corePriv.PublicKey().String(),
-		BackhaulAddr: hub.BackhaulAddr.String(), PrivateKey: cred.private, APIToken: cred.token,
+		BackhaulAddr: hub.BackhaulAddr.String(), ListenPort: hub.ListenPort, PrivateKey: cred.private, APIToken: cred.token,
 		ExpiresAt: hub.JoinExpiresAt}
 	return fmt.Sprintf("curl -fsSL %s | sudo NMVPN_IMAGE=%s sh -s -- %s", c.cfg.InstallURL, c.cfg.HubImage, b.Encode()), nil
 }

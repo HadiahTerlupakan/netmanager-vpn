@@ -7,7 +7,7 @@ import (
 
 func sample() Bundle {
 	return Bundle{
-		CoreEndpoint: "core.example:51820", CorePublicKey: "cpub", BackhaulAddr: "10.99.0.2",
+		CoreEndpoint: "core.example:51820", CorePublicKey: "cpub", BackhaulAddr: "10.99.0.2", ListenPort: 51900,
 		PrivateKey: "priv", APIToken: "tok", ExpiresAt: time.Date(2026, 10, 20, 1, 2, 3, 0, time.UTC),
 	}
 }

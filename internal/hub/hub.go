@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	ifaceUp        = "wg-up"
-	ifaceNM        = "wg-nm"
-	nmListenPort   = 51821
+	ifaceUp = "wg-up"
+	ifaceNM = "wg-nm"
+	// defaultNMPort is wg-nm's port when the join bundle predates carrying it.
+	defaultNMPort  = 51821
 	upMTU          = 1380 // leaves room for the router tunnel's own overhead inside wg-up
 	nmMTU          = 1420
 	coreKeepalive  = 25 * time.Second
@@ -84,12 +85,16 @@ func (s *Service) Join(b joinbundle.Bundle) error {
 	if err != nil {
 		return fmt.Errorf("hub: backhaul address: %w", err)
 	}
+	port := b.ListenPort
+	if port == 0 {
+		port = defaultNMPort
+	}
 	sealed, err := s.box.Seal(b.PrivateKey)
 	if err != nil {
 		return err
 	}
 	err = s.st.SaveHubConfig(store.HubConfig{
-		CorePublicKey: b.CorePublicKey, CoreEndpoint: b.CoreEndpoint, BackhaulAddr: addr,
+		CorePublicKey: b.CorePublicKey, CoreEndpoint: b.CoreEndpoint, BackhaulAddr: addr, ListenPort: port,
 		APIToken: b.APIToken, PrivateKeyUp: sealed, PrivateKeyNM: sealed,
 	})
 	if err != nil {
@@ -152,7 +157,7 @@ func upConfig(cfg store.HubConfig, key string) wgdevice.Config {
 // interface address, and a host route to it cannot shadow any router subnet.
 func nmConfig(cfg store.HubConfig, key string, peers []store.Peer) wgdevice.Config {
 	c := wgdevice.Config{
-		InterfaceName: ifaceNM, PrivateKey: key, ListenPort: nmListenPort, MTU: nmMTU,
+		InterfaceName: ifaceNM, PrivateKey: key, ListenPort: cfg.ListenPort, MTU: nmMTU,
 		Address: netip.PrefixFrom(cfg.BackhaulAddr, 32).String(),
 	}
 	for _, p := range peers {

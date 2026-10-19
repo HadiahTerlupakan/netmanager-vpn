@@ -81,6 +81,7 @@ type HubConfig struct {
 	CorePublicKey string
 	CoreEndpoint  string
 	BackhaulAddr  netip.Addr
+	ListenPort    int
 	APIToken      string
 	PrivateKeyUp  string // sealed
 	PrivateKeyNM  string // sealed

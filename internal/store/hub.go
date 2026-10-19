@@ -8,13 +8,14 @@ import (
 // SaveHubConfig writes the hub's single configuration row, replacing any prior one.
 func (s *Store) SaveHubConfig(c HubConfig) error {
 	_, err := s.db.Exec(`INSERT INTO hub_config
-		(id, core_public_key, core_endpoint, backhaul_addr, api_token, private_key_up, private_key_nm)
-		VALUES (1,?,?,?,?,?,?)
+		(id, core_public_key, core_endpoint, backhaul_addr, listen_port, api_token, private_key_up, private_key_nm)
+		VALUES (1,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET core_public_key = excluded.core_public_key,
 			core_endpoint = excluded.core_endpoint, backhaul_addr = excluded.backhaul_addr,
+			listen_port = excluded.listen_port,
 			api_token = excluded.api_token, private_key_up = excluded.private_key_up,
 			private_key_nm = excluded.private_key_nm`,
-		c.CorePublicKey, c.CoreEndpoint, c.BackhaulAddr.String(), c.APIToken,
+		c.CorePublicKey, c.CoreEndpoint, c.BackhaulAddr.String(), c.ListenPort, c.APIToken,
 		c.PrivateKeyUp, c.PrivateKeyNM)
 	return err
 }
@@ -23,9 +24,9 @@ func (s *Store) SaveHubConfig(c HubConfig) error {
 func (s *Store) LoadHubConfig() (HubConfig, error) {
 	var c HubConfig
 	var addr string
-	err := s.db.QueryRow(`SELECT core_public_key, core_endpoint, backhaul_addr, api_token,
+	err := s.db.QueryRow(`SELECT core_public_key, core_endpoint, backhaul_addr, listen_port, api_token,
 		private_key_up, private_key_nm FROM hub_config WHERE id = 1`).
-		Scan(&c.CorePublicKey, &c.CoreEndpoint, &addr, &c.APIToken, &c.PrivateKeyUp, &c.PrivateKeyNM)
+		Scan(&c.CorePublicKey, &c.CoreEndpoint, &addr, &c.ListenPort, &c.APIToken, &c.PrivateKeyUp, &c.PrivateKeyNM)
 	if err == sql.ErrNoRows {
 		return HubConfig{}, ErrNotFound
 	}
