@@ -108,8 +108,9 @@ func (c *Core) tick(ctx context.Context) error {
 }
 
 // collectHandshakes asks every online hub for its peers, holding no lock: a
-// slow hub must not stall mutations. An unreachable hub just contributes
-// nothing this pass.
+// slow hub must not stall mutations. A hub whose list cannot be read
+// contributes the stamps it last reported, so its routers age out through
+// freshWindow instead of all dropping on one failed call.
 func (c *Core) collectHandshakes(ctx context.Context, routers []store.Router) (map[string]map[string]time.Time, error) {
 	hubs, err := c.st.ListHubs()
 	if err != nil {
@@ -119,28 +120,42 @@ func (c *Core) collectHandshakes(ctx context.Context, routers []store.Router) (m
 	for _, r := range routers {
 		byKey[r.PublicKey] = r.ID
 	}
+	last := make(map[string]map[string]time.Time, len(hubs))
 	out := map[string]map[string]time.Time{}
 	for _, h := range hubs {
 		if h.Status != store.HubStatusOnline {
 			continue
 		}
-		peers, err := c.hubs.Peers(ctx, h)
+		seen, err := c.hubHandshakes(ctx, h, byKey)
 		if err != nil {
-			slog.Warn("hub peers unreadable", "hub", h.ID, "err", err)
-			continue
+			slog.Warn("hub peers unreadable, reusing last report", "hub", h.ID, "err", err)
+			seen = c.lastSeen[h.ID]
 		}
-		for _, p := range peers {
-			rid, ok := byKey[p.PublicKey]
-			if !ok || p.LastHandshakeAt == nil {
-				continue
-			}
+		last[h.ID] = seen
+		for rid, at := range seen {
 			if out[rid] == nil {
 				out[rid] = map[string]time.Time{}
 			}
-			out[rid][h.ID] = *p.LastHandshakeAt
+			out[rid][h.ID] = at
 		}
 	}
+	c.lastSeen = last
 	return out, nil
+}
+
+// hubHandshakes maps router ID to the handshake one hub reports for it.
+func (c *Core) hubHandshakes(ctx context.Context, h store.Hub, byKey map[string]string) (map[string]time.Time, error) {
+	peers, err := c.hubs.Peers(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]time.Time{}
+	for _, p := range peers {
+		if rid, ok := byKey[p.PublicKey]; ok && p.LastHandshakeAt != nil {
+			seen[rid] = *p.LastHandshakeAt
+		}
+	}
+	return seen, nil
 }
 
 // listedHandshakes keeps, per router, only the handshakes from hubs in its own

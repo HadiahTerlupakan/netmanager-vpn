@@ -20,6 +20,9 @@ const (
 	hubAPIPort    = "7480"
 	hubAPITimeout = 5 * time.Second
 	maxErrBody    = 512
+	// A peer entry is about 150 bytes of JSON, so this holds some 200 000
+	// routers; a truncated list would fail to parse and read as a lost hub.
+	maxRespBody = 32 << 20
 )
 
 // ErrHubAddressInUse means the hub already carries another peer on that address.
@@ -102,7 +105,7 @@ func (c *httpHubClient) do(ctx context.Context, h store.Hub, method, path string
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
 	if resp.StatusCode == http.StatusConflict && bytes.Contains(raw, []byte("address_in_use")) {
 		return nil, ErrHubAddressInUse
 	}

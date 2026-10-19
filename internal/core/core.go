@@ -55,7 +55,10 @@ type Core struct {
 	active map[string]string // router ID -> hub ID currently carrying it
 	// handshakes holds the newest router handshake seen on its active hub.
 	handshakes map[string]time.Time
-	applyMu    sync.Mutex
+	// lastSeen keeps each hub's last readable report (hub ID -> router ID ->
+	// handshake). Only tick touches it, from the one active-loop goroutine.
+	lastSeen map[string]map[string]time.Time
+	applyMu  sync.Mutex
 	// regMu serializes registry rewrites (status refresh, join reissue) so a
 	// stale snapshot cannot overwrite a freshly reissued hub.
 	regMu sync.Mutex
@@ -71,7 +74,8 @@ func New(dev wgdevice.Device, st *store.Store, box *secret.Box, hubs HubClient, 
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}, handshakes: map[string]time.Time{}}
+	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}, handshakes: map[string]time.Time{},
+		lastSeen: map[string]map[string]time.Time{}}
 }
 
 // Init makes sure wg-core has a key and applies its configuration. The active

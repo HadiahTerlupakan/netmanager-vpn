@@ -97,3 +97,22 @@ func TestHTTPHubClientErrors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Thousands of routers on one hub exceed a megabyte of JSON; truncating it
+// would fail the parse and look like the hub lost every peer.
+func TestHTTPHubClientReadsLargePeerList(t *testing.T) {
+	f := newFixture(t)
+	peers := make([]hub.PeerStatus, 20000)
+	for i := range peers {
+		peers[i] = hub.PeerStatus{PublicKey: strings.Repeat("k", 44), Address: "10.100.0.5"}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(peers)
+	}))
+	defer srv.Close()
+	c, h := clientFor(t, f, srv)
+	got, err := c.Peers(context.Background(), h)
+	if err != nil || len(got) != len(peers) {
+		t.Fatalf("got %d peers, err %v", len(got), err)
+	}
+}

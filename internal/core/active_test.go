@@ -315,3 +315,38 @@ func TestRestartKeepsActiveHubWithoutEvent(t *testing.T) {
 		t.Fatalf("restart recorded a move: %+v", evs)
 	}
 }
+
+// One failed Peers call must not unroute every router on a live hub: the
+// last stamps it reported are reused and age out through freshWindow.
+func TestTickReusesLastHandshakesWhenHubPeersFail(t *testing.T) {
+	e := activeFixture(t, 0, 1)
+	addr := e.router.Address.String() + "/32"
+	e.hubs.set(e.hub[0].ID, e.router.PublicKey, testNow.Add(-10*time.Second))
+	e.tick(t)
+	e.hubs.mu.Lock()
+	e.hubs.down[e.hub[0].ID] = true
+	e.hubs.mu.Unlock()
+	e.tick(t)
+	if !slices.Contains(e.allowedOn(0), addr) {
+		t.Fatalf("router unrouted by one failed Peers call: A=%v", e.allowedOn(0))
+	}
+	if evs, _ := e.f.st.ListRouterEvents(e.router.ID, 10); len(evs) != 1 {
+		t.Fatalf("failed Peers call recorded a move: %+v", evs)
+	}
+
+	later := testNow.Add(freshWindow)
+	e.f.core.cfg.Now = func() time.Time { return later }
+	alive := later.Add(-time.Second)
+	e.f.dev.SetStatus([]wgdevice.PeerStatus{
+		{PublicKey: e.hub[0].PublicKey, LastHandshakeAt: &alive},
+		{PublicKey: e.hub[1].PublicKey, LastHandshakeAt: &alive},
+	})
+	e.tick(t)
+	if slices.Contains(e.allowedOn(0), addr) {
+		t.Fatal("reused stamp never aged out")
+	}
+	evs, _ := e.f.st.ListRouterEvents(e.router.ID, 10)
+	if len(evs) != 2 || evs[0].FromHubID != e.hub[0].ID || evs[0].ToHubID != "" {
+		t.Fatalf("want a move to none once the stamp aged, got %+v", evs)
+	}
+}
