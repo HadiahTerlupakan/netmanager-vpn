@@ -179,7 +179,11 @@ func TestHubStatusTransitions(t *testing.T) {
 		{"past expiry, never handshaked", store.HubStatusPendingInstall, now.Add(-time.Minute), nil, "expired"},
 		{"stays expired", store.HubStatusExpired, now.Add(-time.Hour), nil, "expired"},
 		{"handshaked once keeps offline past expiry", store.HubStatusOnline, now.Add(-time.Hour), nil, "offline"},
-		{"late first handshake past expiry", store.HubStatusPendingInstall, now.Add(-time.Hour), ago(5 * time.Second), "online"},
+		{"first handshake after expiry is a leaked bundle", store.HubStatusPendingInstall, now.Add(-time.Hour), ago(5 * time.Second), "expired"},
+		{"handshake before expiry, checked later", store.HubStatusPendingInstall, now.Add(-time.Second), ago(2 * time.Second), "online"},
+		{"exactly 180s", store.HubStatusOnline, expiry, ago(180 * time.Second), "offline"},
+		{"exactly at expiry", store.HubStatusPendingInstall, now, nil, "pending_install"},
+		{"handshake exactly at expiry counts", store.HubStatusPendingInstall, now.Add(-5 * time.Second), ago(5 * time.Second), "online"},
 	} {
 		if got := hubStatus(tc.stored, tc.expiry, tc.handshake, now); got != tc.want {
 			t.Errorf("%s: got %s want %s", tc.name, got, tc.want)
@@ -300,5 +304,73 @@ func TestApplyCoreIncludesActiveRoutersAndAdmins(t *testing.T) {
 	a, ok := peerByKey(f.dev.Last(), "adminpk")
 	if !ok || len(a.AllowedIPs) != 1 || a.AllowedIPs[0] != "10.99.128.1/32" {
 		t.Fatalf("admin peer %+v", a)
+	}
+}
+
+type failingDevice struct {
+	*wgdevice.Memory
+	fail bool
+}
+
+func (d *failingDevice) Apply(cfg wgdevice.Config) error {
+	if d.fail {
+		return errors.New("apply failed")
+	}
+	return d.Memory.Apply(cfg)
+}
+
+func TestCreateHubRollsBackWhenApplyFails(t *testing.T) {
+	f := newFixture(t)
+	dev := &failingDevice{Memory: wgdevice.NewMemory()}
+	f.core.dev = dev
+	dev.fail = true
+	if _, _, err := f.core.CreateHub("h", "h.example.com", 0); err == nil {
+		t.Fatal("want error")
+	}
+	if views, _ := f.core.ListHubs(); len(views) != 0 {
+		t.Fatalf("half-created hub left: %+v", views)
+	}
+	dev.fail = false
+	hub, _, err := f.core.CreateHub("h", "h.example.com", 0)
+	if err != nil || hub.BackhaulAddr.String() != "10.99.0.2" {
+		t.Fatalf("address not free again: %+v %v", hub, err)
+	}
+}
+
+func TestApplyCoreDropsPastExpiryPendingHub(t *testing.T) {
+	f := newFixture(t)
+	hub, _, _ := f.core.CreateHub("h", "h.example.com", 0)
+	f.core.cfg.Now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	if err := f.core.applyCore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := peerByKey(f.dev.Last(), hub.PublicKey); ok {
+		t.Fatal("expired join still on wg-core before any refresh")
+	}
+}
+
+func TestRefreshPromotesHubToOnline(t *testing.T) {
+	f := newFixture(t)
+	hub, _, _ := f.core.CreateHub("h", "h.example.com", 0)
+	hs := testNow.Add(-10 * time.Second)
+	f.dev.SetStatus([]wgdevice.PeerStatus{{PublicKey: hub.PublicKey, LastHandshakeAt: &hs}})
+	if err := f.core.RefreshHubStatuses(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := f.st.GetHub(hub.ID)
+	if got.Status != store.HubStatusOnline {
+		t.Fatalf("status %s", got.Status)
+	}
+	if _, ok := peerByKey(f.dev.Last(), hub.PublicKey); !ok {
+		t.Fatal("online hub missing from wg-core")
+	}
+}
+
+func TestCreateHubRejectsUnusableAddresses(t *testing.T) {
+	f := newFixture(t)
+	for _, host := range []string{"::1", "2001:db8::1", "fe80::1%eth0", "0.0.0.0", "127.0.0.1", "224.0.0.1"} {
+		if _, _, err := f.core.CreateHub("x", host, 0); !errors.Is(err, ErrValidation) {
+			t.Errorf("%s: err = %v", host, err)
+		}
 	}
 }

@@ -435,3 +435,30 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 		t.Fatal("Open accepted a database from a newer build")
 	}
 }
+
+func TestHubRouterCountsSkipsReleased(t *testing.T) {
+	s := openTemp(t)
+	a := newHub(t, s, "a", "10.99.0.2")
+	b := newHub(t, s, "b", "10.99.0.3")
+	r1 := newRouter(t, s, "r1", "10.100.0.1")
+	r2 := newRouter(t, s, "r2", "10.100.0.2")
+	for _, r := range []Router{r1, r2} {
+		if err := s.SetRouterHubs(r.ID, []string{a.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetRouterHubs(r2.ID, []string{a.ID, b.ID}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.HubRouterCounts()
+	if err != nil || got[a.ID] != 2 || got[b.ID] != 1 {
+		t.Fatalf("counts %v err %v", got, err)
+	}
+	if err := s.DeleteRouter(r1.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.HubRouterCounts()
+	if got[a.ID] != 1 {
+		t.Fatalf("released router still counted: %v", got)
+	}
+}

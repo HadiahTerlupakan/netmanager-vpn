@@ -3,6 +3,7 @@ package core
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -64,12 +65,29 @@ func (c *Core) CreateHub(name, publicHost string, port int) (store.Hub, string, 
 		return store.Hub{}, "", err
 	}
 	cmd, err := c.finishJoin(hub, cred)
-	return hub, cmd, err
+	if err != nil {
+		return store.Hub{}, "", c.rollbackHub(hub.ID, err)
+	}
+	return hub, cmd, nil
+}
+
+// rollbackHub removes a hub whose creation failed after its row was stored, so
+// no unreachable hub or leaked backhaul address is left behind.
+func (c *Core) rollbackHub(id string, cause error) error {
+	errs := []error{cause}
+	if err := c.st.DeleteHub(id); err != nil {
+		errs = append(errs, fmt.Errorf("core: roll back hub: %w", err))
+	} else if err := c.applyCore(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // ReissueJoin rotates a hub's keys for a fresh install. A hub that has
 // connected is refused: the new key would cut it off until reinstalled.
 func (c *Core) ReissueJoin(id string) (string, error) {
+	c.regMu.Lock()
+	defer c.regMu.Unlock()
 	hub, err := c.st.GetHub(id)
 	if err != nil {
 		return "", err
@@ -106,7 +124,7 @@ func (c *Core) ListHubs() ([]HubView, error) {
 	if err != nil {
 		return nil, err
 	}
-	counts, err := c.routerCounts()
+	counts, err := c.st.HubRouterCounts()
 	if err != nil {
 		return nil, err
 	}
@@ -118,26 +136,10 @@ func (c *Core) ListHubs() ([]HubView, error) {
 	return out, nil
 }
 
-func (c *Core) routerCounts() (map[string]int, error) {
-	routers, err := c.st.ListRouters()
-	if err != nil {
-		return nil, err
-	}
-	counts := map[string]int{}
-	for _, r := range routers {
-		links, err := c.st.ListRouterHubs(r.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, l := range links {
-			counts[l.HubID]++
-		}
-	}
-	return counts, nil
-}
-
 // RefreshHubStatuses recomputes every hub's status from wg-core handshakes.
 func (c *Core) RefreshHubStatuses() error {
+	c.regMu.Lock()
+	defer c.regMu.Unlock()
 	live, err := c.dev.Status(ifaceCore)
 	if err != nil {
 		return err
@@ -151,19 +153,23 @@ func (c *Core) RefreshHubStatuses() error {
 		return err
 	}
 	now := c.cfg.Now()
-	expired := false
+	changed := false
 	for _, h := range hubs {
 		hs := handshakes[h.PublicKey]
 		status := hubStatus(h.Status, h.JoinExpiresAt, hs, now)
 		if status == h.Status && !newerThan(hs, h.LastSeenAt) {
 			continue
 		}
-		if err := c.st.UpdateHubStatus(h.ID, status, hs); err != nil {
+		err := c.st.UpdateHubStatus(h.ID, status, hs)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		expired = expired || (status == store.HubStatusExpired && h.Status != status)
+		changed = changed || status != h.Status
 	}
-	if expired {
+	if changed {
 		return c.applyCore()
 	}
 	return nil
@@ -174,17 +180,27 @@ func newerThan(hs, seen *time.Time) bool {
 }
 
 // hubStatus derives a hub's state. A hub that has handshaked once keeps
-// online/offline for good; only one that never connected can expire.
+// online/offline for good. One that has not connected before its join expires
+// is expired, and a handshake after the expiry does not count: that is a
+// leaked bundle, not the operator's install.
 func hubStatus(stored string, joinExpiresAt time.Time, handshake *time.Time, now time.Time) string {
-	switch {
-	case handshake != nil && now.Sub(*handshake) < onlineWindow:
-		return store.HubStatusOnline
-	case handshake != nil, stored == store.HubStatusOnline, stored == store.HubStatusOffline:
-		return store.HubStatusOffline
-	case stored == store.HubStatusExpired, now.After(joinExpiresAt):
+	if stored == store.HubStatusOnline || stored == store.HubStatusOffline {
+		return liveStatus(handshake, now)
+	}
+	if handshake != nil && !handshake.After(joinExpiresAt) {
+		return liveStatus(handshake, now)
+	}
+	if handshake != nil || stored == store.HubStatusExpired || now.After(joinExpiresAt) {
 		return store.HubStatusExpired
 	}
 	return store.HubStatusPendingInstall
+}
+
+func liveStatus(handshake *time.Time, now time.Time) string {
+	if handshake != nil && now.Sub(*handshake) < onlineWindow {
+		return store.HubStatusOnline
+	}
+	return store.HubStatusOffline
 }
 
 type hubCredentials struct {
@@ -230,7 +246,10 @@ func validateHub(name, host string, port int) error {
 	case port < 1 || port > 65535:
 		return fmt.Errorf("%w: port %d out of range", ErrValidation, port)
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+			return fmt.Errorf("%w: public host must be a public IPv4 address or a hostname", ErrValidation)
+		}
 		return nil
 	}
 	if len(host) > 253 || !hostnameRE.MatchString(host) {

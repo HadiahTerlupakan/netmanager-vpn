@@ -47,6 +47,9 @@ type Core struct {
 	mu      sync.Mutex
 	active  map[string]string // router ID -> hub ID currently carrying it
 	applyMu sync.Mutex
+	// regMu serializes registry rewrites (status refresh, join reissue) so a
+	// stale snapshot cannot overwrite a freshly reissued hub.
+	regMu sync.Mutex
 }
 
 // New builds a Core. A nil cfg.Now means time.Now.
@@ -116,7 +119,8 @@ func (c *Core) applyCore() error {
 	cfg := wgdevice.Config{InterfaceName: ifaceCore, PrivateKey: key.String(),
 		Address: coreAddress, ListenPort: corePort, MTU: coreMTU}
 	for _, h := range hubs {
-		if h.Status == store.HubStatusExpired {
+		if h.Status == store.HubStatusExpired ||
+			(h.Status == store.HubStatusPendingInstall && c.cfg.Now().After(h.JoinExpiresAt)) {
 			continue
 		}
 		ips := append([]string{host32(h.BackhaulAddr)}, routed[h.ID]...)

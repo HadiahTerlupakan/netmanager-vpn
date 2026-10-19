@@ -260,3 +260,23 @@ func (s *Store) TakenAddresses(kind string) (map[netip.Addr]time.Time, error) {
 	}
 	return out, rows.Err()
 }
+
+// HubRouterCounts returns, per hub, how many unreleased routers list it.
+func (s *Store) HubRouterCounts() (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT rh.hub_id, COUNT(*) FROM router_hubs rh
+		JOIN routers r ON r.id = rh.router_id WHERE r.released_at IS NULL GROUP BY rh.hub_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
