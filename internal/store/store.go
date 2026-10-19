@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +26,11 @@ var (
 	ErrConflict = errors.New("store: conflict")
 	// ErrInUse is returned when a row cannot be deleted because others reference it.
 	ErrInUse = errors.New("store: in use")
+)
+
+const (
+	privateDir  fs.FileMode = 0o700
+	privateFile fs.FileMode = 0o600
 )
 
 // Store is a handle on the SQLite database.
@@ -111,8 +118,13 @@ var migrations = []string{
 
 // Open opens (creating if needed) the database at path and applies pending
 // migrations. A single connection serializes writers so WAL never reports
-// SQLITE_BUSY between this process's own goroutines.
+// SQLITE_BUSY between this process's own goroutines. The directory is closed
+// to everyone else first, which also covers the -wal and -shm files SQLite
+// creates beside the database.
 func Open(path string) (*Store, error) {
+	if err := os.Chmod(filepath.Dir(path), privateDir); err != nil {
+		return nil, fmt.Errorf("store: restrict state directory: %w", err)
+	}
 	dsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
@@ -124,6 +136,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if err := os.Chmod(path, privateFile); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: restrict database: %w", err)
 	}
 	return s, nil
 }
@@ -243,6 +259,9 @@ func (s *Store) BackupTo(path string) error {
 		return fmt.Errorf("store: backup: %s already exists", path)
 	}
 	err := vacuumInto(s.db, path)
+	if err == nil {
+		err = os.Chmod(path, privateFile)
+	}
 	if err == nil {
 		return nil
 	}
