@@ -1,0 +1,158 @@
+// Package core runs the control plane: the hub registry, routers, and the
+// wg-core interface every hub tunnels into.
+package core
+
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"sync"
+	"time"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/wgdevice"
+)
+
+const (
+	ifaceCore   = "wg-core"
+	coreAddress = "10.99.0.1/24"
+	corePort    = 51822
+	coreMTU     = 1380
+)
+
+// ErrValidation marks input the caller can fix.
+var ErrValidation = errors.New("core: invalid input")
+
+// Config is the core's deployment-specific settings.
+type Config struct {
+	// CoreEndpoint is wg-core's public host:port, which hubs dial.
+	CoreEndpoint string
+	InstallURL   string
+	Now          func() time.Time
+}
+
+// Core owns the registry and the wg-core interface.
+type Core struct {
+	dev  wgdevice.Device
+	st   *store.Store
+	box  *secret.Box
+	hubs HubClient
+	cfg  Config
+
+	// mu guards active; applyMu serializes writes to the device so two
+	// mutations cannot interleave a stale config over a fresh one.
+	mu      sync.Mutex
+	active  map[string]string // router ID -> hub ID currently carrying it
+	applyMu sync.Mutex
+}
+
+// New builds a Core. A nil cfg.Now means time.Now.
+func New(dev wgdevice.Device, st *store.Store, box *secret.Box, hubs HubClient, cfg Config) *Core {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}}
+}
+
+// Init makes sure wg-core has a key and applies its configuration.
+func (c *Core) Init() error {
+	if _, err := c.corePrivateKey(); err != nil {
+		return err
+	}
+	return c.applyCore()
+}
+
+func (c *Core) corePrivateKey() (wgtypes.Key, error) {
+	sealed, err := c.st.ServerKey(ifaceCore)
+	if errors.Is(err, store.ErrNotFound) {
+		return c.createCoreKey()
+	}
+	if err != nil {
+		return wgtypes.Key{}, err
+	}
+	plain, err := c.box.Open(sealed)
+	if err != nil {
+		return wgtypes.Key{}, err
+	}
+	return wgtypes.ParseKey(plain)
+}
+
+func (c *Core) createCoreKey() (wgtypes.Key, error) {
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return wgtypes.Key{}, err
+	}
+	sealed, err := c.box.Seal(key.String())
+	if err != nil {
+		return wgtypes.Key{}, err
+	}
+	return key, c.st.SetServerKey(ifaceCore, sealed)
+}
+
+// applyCore rebuilds wg-core from the store and the active map. Every
+// mutation ends here so the interface never drifts from the registry.
+func (c *Core) applyCore() error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	key, err := c.corePrivateKey()
+	if err != nil {
+		return err
+	}
+	hubs, err := c.st.ListHubs()
+	if err != nil {
+		return err
+	}
+	admins, err := c.st.ListAdminPeers()
+	if err != nil {
+		return err
+	}
+	routed, err := c.routedAddrs()
+	if err != nil {
+		return err
+	}
+	cfg := wgdevice.Config{InterfaceName: ifaceCore, PrivateKey: key.String(),
+		Address: coreAddress, ListenPort: corePort, MTU: coreMTU}
+	for _, h := range hubs {
+		if h.Status == store.HubStatusExpired {
+			continue
+		}
+		ips := append([]string{host32(h.BackhaulAddr)}, routed[h.ID]...)
+		cfg.Peers = append(cfg.Peers, wgdevice.PeerConfig{PublicKey: h.PublicKey, AllowedIPs: ips})
+	}
+	for _, a := range admins {
+		cfg.Peers = append(cfg.Peers, wgdevice.PeerConfig{PublicKey: a.PublicKey, AllowedIPs: []string{host32(a.Address)}})
+	}
+	if err := c.dev.Apply(cfg); err != nil {
+		return fmt.Errorf("core: apply %s: %w", ifaceCore, err)
+	}
+	return nil
+}
+
+// routedAddrs lists, per hub, the /32 of every router currently active on it.
+func (c *Core) routedAddrs() (map[string][]string, error) {
+	c.mu.Lock()
+	snapshot := make(map[string]string, len(c.active))
+	for r, h := range c.active {
+		snapshot[r] = h
+	}
+	c.mu.Unlock()
+	if len(snapshot) == 0 {
+		return nil, nil
+	}
+	routers, err := c.st.ListRouters()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for _, r := range routers {
+		if hubID, ok := snapshot[r.ID]; ok {
+			out[hubID] = append(out[hubID], host32(r.Address))
+		}
+	}
+	return out, nil
+}
+
+func host32(a netip.Addr) string { return netip.PrefixFrom(a, 32).String() }
