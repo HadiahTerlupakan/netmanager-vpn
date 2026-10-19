@@ -82,13 +82,23 @@ func (s *Store) ClaimRouter(id, ref string) error {
 // DeleteRouter soft-deletes a router: the row stays with released_at set so its
 // address is not handed out again while the old nas.nasname may still exist.
 func (s *Store) DeleteRouter(id string) error {
+	return s.releaseRouter(id, "")
+}
+
+// DeleteRouterIfPending is DeleteRouter that refuses a router claimed in the
+// meantime (ErrNotFound), so expiry cannot remove a router just brought up.
+func (s *Store) DeleteRouterIfPending(id string) error {
+	return s.releaseRouter(id, RouterStatusPending)
+}
+
+func (s *Store) releaseRouter(id, onlyStatus string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	err = affected(tx.Exec(`UPDATE routers SET released_at = ? WHERE id = ? AND released_at IS NULL`,
-		fmtTime(time.Now()), id))
+	err = affected(tx.Exec(`UPDATE routers SET released_at = ? WHERE id = ? AND released_at IS NULL
+		AND (? = '' OR status = ?)`, fmtTime(time.Now()), id, onlyStatus, onlyStatus))
 	if err != nil {
 		return err
 	}

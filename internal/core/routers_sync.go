@@ -12,50 +12,51 @@ import (
 // prune is what makes address reuse safe: a failed delete leaves a stale peer
 // that would otherwise collide with the next router given that address.
 func (c *Core) SyncPending(ctx context.Context) error {
-	routers, err := c.st.ListRouters()
-	if err != nil {
-		return err
-	}
 	hubs, err := c.st.ListHubs()
 	if err != nil {
 		return err
 	}
-	online := map[string]store.Hub{}
+	var errs []error
 	for _, h := range hubs {
-		if h.Status == store.HubStatusOnline {
-			online[h.ID] = h
+		if h.Status != store.HubStatusOnline {
+			continue
 		}
+		errs = append(errs, c.retryPending(ctx, h), c.prune(ctx, h))
 	}
-	wanted := map[string]map[string]bool{}
+	return errors.Join(errs...)
+}
+
+func (c *Core) retryPending(ctx context.Context, h store.Hub) error {
+	routers, err := c.st.ListRouters()
+	if err != nil {
+		return err
+	}
 	for _, rt := range routers {
 		links, err := c.st.ListRouterHubs(rt.ID)
 		if err != nil {
 			return err
 		}
 		for _, l := range links {
-			if wanted[l.HubID] == nil {
-				wanted[l.HubID] = map[string]bool{}
-			}
-			wanted[l.HubID][rt.PublicKey] = true
-			if h, ok := online[l.HubID]; ok && l.SyncState == store.SyncStatePending {
+			if l.HubID == h.ID && l.SyncState == store.SyncStatePending {
 				c.pushPeer(ctx, rt, h)
 			}
 		}
 	}
-	var errs []error
-	for _, h := range hubs {
-		if _, ok := online[h.ID]; ok {
-			errs = append(errs, c.prune(ctx, h, wanted[h.ID]))
-		}
-	}
-	return errors.Join(errs...)
+	return nil
 }
 
-func (c *Core) prune(ctx context.Context, h store.Hub, keep map[string]bool) error {
+// prune lists the hub's peers before reading the registry: a router registered
+// in between is then in the registry snapshot and is kept. Reading in the
+// other order would delete peers that were created a moment ago.
+func (c *Core) prune(ctx context.Context, h store.Hub) error {
 	peers, err := c.hubs.Peers(ctx, h)
 	if err != nil {
 		slog.Warn("hub peers not listed for prune", "hub", h.ID, "err", err)
 		return nil
+	}
+	keep, err := c.routerKeysOn(h.ID)
+	if err != nil {
+		return err
 	}
 	for _, p := range peers {
 		if keep[p.PublicKey] {
@@ -66,4 +67,24 @@ func (c *Core) prune(ctx context.Context, h store.Hub, keep map[string]bool) err
 		}
 	}
 	return nil
+}
+
+func (c *Core) routerKeysOn(hubID string) (map[string]bool, error) {
+	routers, err := c.st.ListRouters()
+	if err != nil {
+		return nil, err
+	}
+	keep := map[string]bool{}
+	for _, rt := range routers {
+		links, err := c.st.ListRouterHubs(rt.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range links {
+			if l.HubID == hubID {
+				keep[rt.PublicKey] = true
+			}
+		}
+	}
+	return keep, nil
 }

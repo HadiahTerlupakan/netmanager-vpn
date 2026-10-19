@@ -1,6 +1,10 @@
 package core
 
-import "github.com/hadiahterlupakan/netmanager-vpn/internal/store"
+import (
+	"log/slog"
+
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
+)
 
 // GetRouter returns the router with its server list and recent hub changes.
 func (c *Core) GetRouter(id string) (RouterView, error) {
@@ -21,6 +25,8 @@ func (c *Core) GetRouter(id string) (RouterView, error) {
 		name := ""
 		if h, err := c.st.GetHub(l.HubID); err == nil {
 			name = h.Name
+		} else {
+			slog.Warn("hub name not read", "hub", l.HubID, "err", err)
 		}
 		v.Hubs = append(v.Hubs, RouterHub{HubID: l.HubID, Name: name, Priority: l.Priority, SyncState: l.SyncState})
 	}

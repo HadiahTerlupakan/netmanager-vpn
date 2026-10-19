@@ -462,3 +462,24 @@ func TestHubRouterCountsSkipsReleased(t *testing.T) {
 		t.Fatalf("released router still counted: %v", got)
 	}
 }
+
+func TestDeleteRouterIfPendingRefusesClaimed(t *testing.T) {
+	s := openTemp(t)
+	pending := newRouter(t, s, "p", "10.100.0.1")
+	claimed := newRouter(t, s, "c", "10.100.0.2")
+	if err := s.ClaimRouter(claimed.ID, "dev-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteRouterIfPending(claimed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("claimed: err = %v", err)
+	}
+	if _, err := s.GetRouter(claimed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteRouterIfPending(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRouter(pending.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("pending router survived: %v", err)
+	}
+}

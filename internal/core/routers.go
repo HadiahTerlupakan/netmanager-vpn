@@ -126,15 +126,44 @@ func (c *Core) validateHubIDs(ids []string) ([]store.Hub, error) {
 }
 
 // pushPeer registers the router on a hub and records the outcome. A failure is
-// not returned: the row stays pending and SyncPending retries it.
+// not returned: the row stays pending and SyncPending retries it. The router
+// and its link are re-read first because callers work from snapshots: pushing
+// for a router deleted or unassigned since would re-register a revoked peer.
 func (c *Core) pushPeer(ctx context.Context, rt store.Router, h store.Hub) {
+	if !c.stillPending(rt.ID, h.ID) {
+		return
+	}
 	if err := c.hubs.UpsertPeer(ctx, h, rt.PublicKey, rt.Address); err != nil {
 		slog.Warn("router peer not registered, left pending", "router", rt.ID, "hub", h.ID, "err", err)
 		return
 	}
-	if err := c.st.UpdateRouterHubSyncState(rt.ID, h.ID, store.SyncStateSynced); err != nil {
+	err := c.st.UpdateRouterHubSyncState(rt.ID, h.ID, store.SyncStateSynced)
+	if errors.Is(err, store.ErrNotFound) {
+		// Revoked while the push was in flight.
+		if derr := c.hubs.DeletePeer(ctx, h, rt.PublicKey); derr != nil {
+			slog.Warn("revoked router peer not undone", "router", rt.ID, "hub", h.ID, "err", derr)
+		}
+		return
+	}
+	if err != nil {
 		slog.Warn("router sync state not recorded", "router", rt.ID, "hub", h.ID, "err", err)
 	}
+}
+
+func (c *Core) stillPending(routerID, hubID string) bool {
+	if _, err := c.st.GetRouter(routerID); err != nil {
+		return false
+	}
+	links, err := c.st.ListRouterHubs(routerID)
+	if err != nil {
+		return false
+	}
+	for _, l := range links {
+		if l.HubID == hubID {
+			return l.SyncState == store.SyncStatePending
+		}
+	}
+	return false
 }
 
 // SetRouterHubs replaces the router's ordered hub list.
@@ -163,6 +192,7 @@ func (c *Core) SetRouterHubs(ctx context.Context, id string, hubIDs []string) er
 		had[o.HubID] = true
 		if !kept[o.HubID] {
 			c.dropPeer(ctx, rt, o.HubID)
+			c.forgetActive(id, o.HubID)
 		}
 	}
 	for _, h := range hubs {
@@ -197,8 +227,23 @@ func (c *Core) ClaimRouter(id, ref string) error {
 	return nil
 }
 
+// forgetActive clears the router's live state when the hub carrying it is
+// removed from its list, so wg-core stops routing it there.
+func (c *Core) forgetActive(routerID, hubID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active[routerID] == hubID {
+		delete(c.active, routerID)
+		delete(c.handshakes, routerID)
+	}
+}
+
 // DeleteRouter soft-deletes the router, then removes its peer from every hub.
 func (c *Core) DeleteRouter(ctx context.Context, id string) error {
+	return c.removeRouter(ctx, id, c.st.DeleteRouter)
+}
+
+func (c *Core) removeRouter(ctx context.Context, id string, del func(string) error) error {
 	rt, err := c.st.GetRouter(id)
 	if err != nil {
 		return err
@@ -207,7 +252,7 @@ func (c *Core) DeleteRouter(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.st.DeleteRouter(id); err != nil {
+	if err := del(id); err != nil {
 		return err
 	}
 	for _, l := range links {
@@ -227,14 +272,19 @@ func (c *Core) ExpirePending(ctx context.Context, now time.Time) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var errs []error
 	for _, r := range routers {
 		if r.Status != store.RouterStatusPending || now.Sub(r.CreatedAt) <= pendingLifetime {
 			continue
 		}
-		if err := c.DeleteRouter(ctx, r.ID); err != nil {
-			return n, err
+		err := c.removeRouter(ctx, r.ID, c.st.DeleteRouterIfPending)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			errs = append(errs, err)
+		default:
+			n++
 		}
-		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
