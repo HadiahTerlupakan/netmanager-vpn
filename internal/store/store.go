@@ -219,3 +219,13 @@ func affected(res sql.Result, err error) error {
 	}
 	return nil
 }
+
+// BackupTo writes a consistent copy of the database to path. VACUUM INTO is
+// used instead of copying the file because the live database is in WAL mode,
+// where a plain copy can miss pages still in the -wal file. path must not exist.
+func (s *Store) BackupTo(path string) error {
+	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("store: backup: %w", err)
+	}
+	return nil
+}

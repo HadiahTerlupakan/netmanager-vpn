@@ -34,7 +34,7 @@ func runCore(ctx context.Context, cfg config) error {
 	}
 	defer st.Close()
 	c := core.New(wgdevice.NewLinux(), st, box, core.NewHTTPHubClient(box),
-		core.Config{CoreEndpoint: cfg.CoreEndpoint, InstallURL: cfg.InstallURL})
+		core.Config{CoreEndpoint: cfg.CoreEndpoint, InstallURL: cfg.InstallURL, HubImage: cfg.HubImage})
 	if err := c.Init(); err != nil {
 		return err
 	}

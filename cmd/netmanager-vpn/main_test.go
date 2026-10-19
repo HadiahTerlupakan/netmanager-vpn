@@ -13,8 +13,9 @@ func TestMainRequiresEnv(t *testing.T) {
 	full := map[string]string{
 		"NMVPN_ENCRYPTION_KEY": "k", "NMVPN_API_TOKEN": "t",
 		"NMVPN_CORE_ENDPOINT": "vpn.example.com:51822", "NMVPN_INSTALL_URL": "https://x/install.sh",
+		"NMVPN_HUB_IMAGE": "ghcr.io/x/netmanager-vpn:abc-1",
 	}
-	for _, missing := range []string{"NMVPN_ENCRYPTION_KEY", "NMVPN_API_TOKEN", "NMVPN_CORE_ENDPOINT", "NMVPN_INSTALL_URL"} {
+	for _, missing := range []string{"NMVPN_ENCRYPTION_KEY", "NMVPN_API_TOKEN", "NMVPN_CORE_ENDPOINT", "NMVPN_INSTALL_URL", "NMVPN_HUB_IMAGE"} {
 		env := map[string]string{}
 		for k, v := range full {
 			if k != missing {
@@ -35,5 +36,26 @@ func TestMainRequiresEnv(t *testing.T) {
 	}
 	if _, err := loadConfig("bogus", envOf(full)); err == nil {
 		t.Fatal("unknown mode accepted")
+	}
+}
+
+func TestHubImageMustBePinned(t *testing.T) {
+	for ref, ok := range map[string]bool{
+		"ghcr.io/x/netmanager-vpn:abc123-1700000000":                 true,
+		"ghcr.io/x/netmanager-vpn@sha256:" + strings.Repeat("a", 64): true,
+		"localhost:5000/netmanager-vpn:v1":                           true,
+		"ghcr.io/x/netmanager-vpn":                                   false,
+		"localhost:5000/netmanager-vpn":                              false,
+		"ghcr.io/x/netmanager-vpn:latest":                            false,
+		"ghcr.io/x/netmanager-vpn:":                                  false,
+	} {
+		env := envOf(map[string]string{
+			"NMVPN_ENCRYPTION_KEY": "k", "NMVPN_API_TOKEN": "t", "NMVPN_CORE_ENDPOINT": "h:1",
+			"NMVPN_INSTALL_URL": "https://x", "NMVPN_HUB_IMAGE": ref,
+		})
+		_, err := loadConfig("core", env)
+		if (err == nil) != ok {
+			t.Errorf("%q: err=%v, want ok=%v", ref, err, ok)
+		}
 	}
 }

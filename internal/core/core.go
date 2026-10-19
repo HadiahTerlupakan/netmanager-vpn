@@ -35,7 +35,10 @@ type Config struct {
 	// CoreEndpoint is wg-core's public host:port, which hubs dial.
 	CoreEndpoint string
 	InstallURL   string
-	Now          func() time.Time
+	// HubImage is the exact, pinned image a new hub pulls; a moving tag would
+	// let hubs drift from the core.
+	HubImage string
+	Now      func() time.Time
 }
 
 // Core owns the registry and the wg-core interface.

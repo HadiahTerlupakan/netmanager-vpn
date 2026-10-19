@@ -483,3 +483,23 @@ func TestDeleteRouterIfPendingRefusesClaimed(t *testing.T) {
 		t.Fatalf("pending router survived: %v", err)
 	}
 }
+
+func TestBackupToCopiesStateAndRefusesOverwrite(t *testing.T) {
+	s := openTemp(t)
+	h := newHub(t, s, "jkt", "10.99.0.2")
+	dst := filepath.Join(t.TempDir(), "backup.db")
+	if err := s.BackupTo(dst); err != nil {
+		t.Fatalf("BackupTo: %v", err)
+	}
+	b, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer b.Close()
+	if _, err := b.GetHub(h.ID); err != nil {
+		t.Fatalf("hub missing from backup: %v", err)
+	}
+	if err := s.BackupTo(dst); err == nil {
+		t.Fatal("second backup overwrote the first")
+	}
+}
