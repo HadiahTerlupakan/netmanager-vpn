@@ -233,6 +233,9 @@ func (c *Core) recordMoves(moves []hubMove) error {
 	now := c.cfg.Now()
 	var errs []error
 	for _, m := range moves {
+		if err := c.st.SetRouterActiveHub(m.routerID, m.to); err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("core: persist active hub of %s: %w", m.routerID, err))
+		}
 		if err := c.st.AddRouterEvent(m.routerID, m.from, m.to, now); err != nil {
 			errs = append(errs, fmt.Errorf("core: record move of %s: %w", m.routerID, err))
 		}

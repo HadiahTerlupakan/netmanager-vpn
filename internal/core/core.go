@@ -74,11 +74,23 @@ func New(dev wgdevice.Device, st *store.Store, box *secret.Box, hubs HubClient, 
 	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}, handshakes: map[string]time.Time{}}
 }
 
-// Init makes sure wg-core has a key and applies its configuration.
+// Init makes sure wg-core has a key and applies its configuration. The active
+// hubs recorded before a restart are seeded first, so the first apply keeps
+// every router routed instead of waiting for the next pass. Handshakes stay
+// empty: they are only known once a hub has been asked.
 func (c *Core) Init() error {
 	if _, err := c.corePrivateKey(); err != nil {
 		return err
 	}
+	active, err := c.st.ActiveHubs()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	for routerID, hubID := range active {
+		c.active[routerID] = hubID
+	}
+	c.mu.Unlock()
 	return c.applyCore()
 }
 

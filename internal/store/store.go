@@ -102,6 +102,9 @@ var migrations = []string{
 		address TEXT NOT NULL,
 		created_at TEXT NOT NULL
 	);`,
+	// The hub carrying each router outlives a core restart; without it the
+	// first apply after boot would unroute every router until the next pass.
+	`ALTER TABLE routers ADD COLUMN active_hub_id TEXT;`,
 }
 
 // Open opens (creating if needed) the database at path and applies pending

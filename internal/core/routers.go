@@ -237,10 +237,13 @@ func (c *Core) ClaimRouter(id, ref string) error {
 // removed from its list, so wg-core stops routing it there.
 func (c *Core) forgetActive(routerID, hubID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.active[routerID] == hubID {
 		delete(c.active, routerID)
 		delete(c.handshakes, routerID)
+	}
+	c.mu.Unlock()
+	if err := c.st.ClearRouterActiveHub(routerID, hubID); err != nil {
+		slog.Warn("recorded active hub not cleared", "router", routerID, "hub", hubID, "err", err)
 	}
 }
 

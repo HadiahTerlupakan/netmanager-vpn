@@ -288,3 +288,30 @@ func TestCommitPrunesGhostRouters(t *testing.T) {
 		t.Fatal("ghost handshake kept")
 	}
 }
+
+// A restart must not strip every router's /32 until the first tick: the hub
+// carrying each router is seeded from the store, and the first tick that sees
+// the same handshakes is not a move.
+func TestRestartKeepsActiveHubWithoutEvent(t *testing.T) {
+	e := activeFixture(t, 0, 1)
+	addr := e.router.Address.String() + "/32"
+	e.hubs.set(e.hub[0].ID, e.router.PublicKey, testNow.Add(-10*time.Second))
+	e.tick(t)
+
+	restarted := New(e.f.dev, e.f.st, e.f.box, e.hubs, e.f.core.cfg)
+	if err := restarted.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.allowedOn(0), addr) {
+		t.Fatalf("router /32 dropped by the restart: A=%v", e.allowedOn(0))
+	}
+	if v, err := restarted.GetRouter(e.router.ID); err != nil || v.ActiveHubID == nil || *v.ActiveHubID != e.hub[0].ID {
+		t.Fatalf("seeded view = %+v %v", v, err)
+	}
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if evs, _ := e.f.st.ListRouterEvents(e.router.ID, 10); len(evs) != 1 {
+		t.Fatalf("restart recorded a move: %+v", evs)
+	}
+}
