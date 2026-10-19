@@ -14,10 +14,12 @@ const (
 	// A handshake older than this means the router is not using that hub; it
 	// matches the online window the hub statuses use.
 	freshWindow = onlineWindow
-	// The router switches hubs on its own and may bounce between two that both
-	// look healthy; the core keeps the current hub unless another is clearly
-	// ahead, so wg-core is not rebuilt every cycle for a coin flip.
-	stickyMargin = 30 * time.Second
+	// The newest handshake marks the hub the router is using now. The current
+	// hub is kept only when its stamp is within the skew two hub clocks may
+	// have, so a tie is not a move; anything wider would hold a planned switch
+	// back until the old hub's stamp aged out, since WireGuard rekeys only
+	// about every 120 s.
+	stickyMargin = 5 * time.Second
 	// Hub clocks drift; a little skew is tolerated, but a stamp further ahead
 	// would otherwise win as "newest" and hold a router on a dead hub.
 	maxFutureSkew = 5 * time.Second
