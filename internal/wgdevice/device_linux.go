@@ -117,106 +117,19 @@ func applyWireGuardConfig(cfg Config) error {
 	}
 	defer client.Close()
 
-	key, err := wgtypes.ParseKey(cfg.PrivateKey)
+	device, err := client.Device(cfg.InterfaceName)
 	if err != nil {
-		return fmt.Errorf("parse server key: %w", err)
+		return fmt.Errorf("read device %s: %w", cfg.InterfaceName, err)
 	}
-
-	peers := make([]wgtypes.PeerConfig, 0, len(cfg.Peers))
-	wanted := make(map[wgtypes.Key]bool, len(cfg.Peers))
-	for _, peer := range cfg.Peers {
-		peerKey, err := wgtypes.ParseKey(peer.PublicKey)
-		if err != nil {
-			return fmt.Errorf("parse peer key: %w", err)
-		}
-		allowed, err := parseAllowedIPs(peer.AllowedIPs)
-		if err != nil {
-			return err
-		}
-		endpoint, err := resolveEndpoint(peer.Endpoint)
-		if err != nil {
-			return err
-		}
-		keepalive := peer.Keepalive
-		wanted[peerKey] = true
-		peers = append(peers, wgtypes.PeerConfig{
-			PublicKey: peerKey,
-			// UpdateOnly is deliberately left false so a new peer is created,
-			// while ReplaceAllowedIPs still rewrites the subnets of one that
-			// already exists — in place, without disturbing its session.
-			ReplaceAllowedIPs:           true,
-			AllowedIPs:                  allowed,
-			Endpoint:                    endpoint,
-			PersistentKeepaliveInterval: &keepalive,
-		})
+	present := make([]wgtypes.Key, 0, len(device.Peers))
+	for _, p := range device.Peers {
+		present = append(present, p.PublicKey)
 	}
-
-	removals, err := peersToRemove(client, cfg.InterfaceName, wanted)
+	wgcfg, err := deviceConfig(cfg, present, resolveEndpoint)
 	if err != nil {
 		return err
 	}
-	peers = append(peers, removals...)
-
-	port := cfg.ListenPort
-	return client.ConfigureDevice(cfg.InterfaceName, wgtypes.Config{
-		PrivateKey: &key,
-		ListenPort: &port,
-		// Deliberately NOT ReplacePeers. That flag drops every peer and re-adds
-		// it, discarding each site's learned endpoint along with its session —
-		// and a site behind NAT is the only side that can start a new one, so
-		// the tunnel stays down until its key ages out, about two minutes. The
-		// peers this function does want gone are removed explicitly instead.
-		ReplacePeers: false,
-		Peers:        peers,
-	})
-}
-
-// peersToRemove names the peers the device still holds that the desired state no
-// longer lists. Without ReplacePeers nothing else would take them away, and a
-// revoked site would keep its tunnel.
-func peersToRemove(client *wgctrl.Client, interfaceName string, wanted map[wgtypes.Key]bool) ([]wgtypes.PeerConfig, error) {
-	device, err := client.Device(interfaceName)
-	if err != nil {
-		return nil, fmt.Errorf("read device %s: %w", interfaceName, err)
-	}
-
-	var removals []wgtypes.PeerConfig
-	for _, existing := range device.Peers {
-		if wanted[existing.PublicKey] {
-			continue
-		}
-		removals = append(removals, wgtypes.PeerConfig{
-			PublicKey: existing.PublicKey,
-			Remove:    true,
-		})
-	}
-	return removals, nil
-}
-
-// resolveEndpoint turns a host:port into an address at Apply time, because the
-// kernel only stores the resolved IP and a hub's DNS name can change. An empty
-// endpoint stays nil so the peer's learned endpoint is not overwritten.
-func resolveEndpoint(endpoint string) (*net.UDPAddr, error) {
-	if endpoint == "" {
-		return nil, nil
-	}
-	addr, err := net.ResolveUDPAddr("udp", endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("resolve endpoint %s: %w", endpoint, err)
-	}
-	return addr, nil
-}
-
-func parseAllowedIPs(entries []string) ([]net.IPNet, error) {
-	allowed := make([]net.IPNet, 0, len(entries))
-	for _, entry := range entries {
-		_, network, err := net.ParseCIDR(entry)
-		if err != nil {
-			return nil, fmt.Errorf("parse allowed ip %s: %w", entry, err)
-		}
-		allowed = append(allowed, *network)
-	}
-	return allowed, nil
+	return client.ConfigureDevice(cfg.InterfaceName, wgcfg)
 }
 
 // syncRoutes makes the routing table match the peers, as planRoutes decides.
