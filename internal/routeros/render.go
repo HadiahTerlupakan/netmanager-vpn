@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"strconv"
+	"regexp"
 	"strings"
 )
 
@@ -35,17 +35,13 @@ const (
 	allowed    = "10.99.0.0/24,10.99.128.0/24"
 	mtu        = 1420
 	keepalive  = "25s"
-	interval   = "20s"
-	failHold   = "00:05:00"
-	pingCount  = 5
-	pingOK     = 4
-	// The switch script needs test for ping and write for the peer; the
-	// scheduler must hold at least the script's policy to run it.
-	policy = "read,write,test"
 	// The server list packs host, port and key into one string per entry;
 	// switchBody splits on the same character.
 	sep = "|"
 )
+
+// hostnameRE is the core's rule for a hub's public host (internal/core).
+var hostnameRE = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
 var subnets = []string{"10.99.0.0/24", "10.99.128.0/24"}
 
@@ -63,7 +59,7 @@ func (in Input) Validate() error {
 	}
 	for i, s := range in.Servers {
 		switch {
-		case s.Host == "" || strings.Contains(s.Host, sep):
+		case !validHost(s.Host):
 			return fmt.Errorf("routeros: server %d: bad host %q", i, s.Host)
 		case s.Port < 1 || s.Port > 65535:
 			return fmt.Errorf("routeros: server %d: bad port %d", i, s.Port)
@@ -74,34 +70,32 @@ func (in Input) Validate() error {
 	return nil
 }
 
+func validHost(h string) bool {
+	if ip, err := netip.ParseAddr(h); err == nil {
+		return ip.Is4()
+	}
+	return len(h) <= 253 && hostnameRE.MatchString(h)
+}
+
 // RenderFull returns the whole script: loopback, tunnel on Servers[0],
 // routing, then the switch script and scheduler. Pasting it again converges
 // on the same state without taking the tunnel down.
 func RenderFull(in Input) string {
 	var b strings.Builder
 	addr := in.Address.String()
-	first := in.Servers[0]
 	ensure(&b, "/interface bridge", "name="+loName,
 		"name="+loName, "comment="+str(tag))
 	ensure(&b, "/ip address", "interface="+loName+" comment="+str(tag),
-		"interface="+loName, "address="+addr+"/32 comment="+str(tag))
+		"interface="+loName, "address="+addr+"/32 network="+addr+" comment="+str(tag))
 	ensure(&b, "/interface wireguard", "name="+ifaceName,
-		"name="+ifaceName,
-		fmt.Sprintf("mtu=%d private-key=%s comment=%s", mtu, str(in.PrivateKey), str(tag+": "+in.Label)))
-	// The endpoint is set only when the peer is created: on a re-paste the
-	// switch script may have moved it to another hub, and moving it back
-	// here would cut the session the paste is arriving through.
-	ensure(&b, "/interface wireguard peers", "interface="+ifaceName,
-		fmt.Sprintf("interface=%s public-key=%s endpoint-address=%s endpoint-port=%d",
-			ifaceName, str(first.PublicKey), str(first.Host), first.Port),
-		fmt.Sprintf("allowed-address=%s persistent-keepalive=%s comment=%s", allowed, keepalive, str(tag)))
+		"name="+ifaceName+" private-key="+str(in.PrivateKey),
+		fmt.Sprintf("mtu=%d comment=%s", mtu, str(tag+": "+in.Label)))
+	fmt.Fprintf(&b, ":if ([/interface wireguard get [find name=%s] private-key] != %s) do={ /interface wireguard set [find name=%s] private-key=%s }\n",
+		ifaceName, str(in.PrivateKey), ifaceName, str(in.PrivateKey))
+	writePeer(&b, in)
 	ensure(&b, "/routing table", "name="+tableName,
 		"name="+tableName+" fib", "comment="+str(tag))
-	for _, s := range subnets {
-		ensure(&b, "/routing rule", "comment="+str(tag)+" dst-address="+s,
-			"dst-address="+s,
-			"action=lookup-only-in-table table="+tableName+" comment="+str(tag))
-	}
+	writeRules(&b)
 	for _, s := range subnets {
 		ensure(&b, "/ip route", "comment="+str(tag)+" dst-address="+s,
 			"dst-address="+s,
@@ -111,85 +105,49 @@ func RenderFull(in Input) string {
 	return b.String()
 }
 
+// writePeer creates the peer on Servers[0]. An existing peer is moved there
+// only when it sits on no listed hub: on a re-paste the switch script may
+// have moved it to another listed hub, and moving it back would cut the
+// session the paste is arriving through.
+func writePeer(b *strings.Builder, in Input) {
+	first := in.Servers[0]
+	ensure(b, "/interface wireguard peers", "interface="+ifaceName,
+		fmt.Sprintf("interface=%s public-key=%s endpoint-address=%s endpoint-port=%d",
+			ifaceName, str(first.PublicKey), str(first.Host), first.Port),
+		fmt.Sprintf("allowed-address=%s persistent-keepalive=%s comment=%s", allowed, keepalive, str(tag)))
+	get := func(prop string) string { return "[/interface wireguard peers get $id " + prop + "]" }
+	fmt.Fprintf(b, "{ :local id ([/interface wireguard peers find interface=%s]->0); "+
+		":local cur ([:tostr %s] . \"|\" . %s . \"|\" . %s); :local list {%s}; "+
+		":if ([:typeof [:find $list $cur]] != \"num\") do={ /interface wireguard peers set $id endpoint-address=%s endpoint-port=%d public-key=%s } }\n",
+		ifaceName, get("endpoint-address"), get("endpoint-port"), get("public-key"), serverList(in),
+		str(first.Host), first.Port, str(first.PublicKey))
+}
+
+// writeRules puts our rules ahead of the operator's: rules are matched in
+// order, so an earlier operator rule (policy routing to a WAN table) would
+// otherwise take the backhaul traffic. place-before needs an existing rule to
+// point at, hence the empty-table branch. A rule is moved only when it sits
+// below our own rules, so a re-paste leaves an already-correct order alone.
+func writeRules(b *strings.Builder) {
+	update := "action=lookup-only-in-table table=" + tableName + " comment=" + str(tag)
+	for _, s := range subnets {
+		sel := "comment=" + str(tag) + " dst-address=" + s
+		fmt.Fprintf(b, ":if ([:len [/routing rule find %s]] = 0) do={ :if ([:len [/routing rule find]] = 0) do={ /routing rule add dst-address=%s %s } else={ /routing rule add dst-address=%s %s place-before=([/routing rule find]->0) } }\n",
+			sel, s, update, s, update)
+		fmt.Fprintf(b, "/routing rule set [find %s] %s\n", sel, update)
+	}
+	for i := len(subnets) - 1; i >= 0; i-- {
+		sel := "comment=" + str(tag) + " dst-address=" + subnets[i]
+		fmt.Fprintf(b, ":if ([:find [/routing rule find] ([/routing rule find %s]->0)] >= %d) do={ /routing rule move [find %s] destination=([/routing rule find]->0) }\n",
+			sel, len(subnets), sel)
+	}
+}
+
 // ensure adds the object only when the selector finds nothing, then sets the
 // mutable properties on whatever it finds, so a re-paste updates in place.
 func ensure(b *strings.Builder, path, selector, create, update string) {
 	fmt.Fprintf(b, ":if ([:len [%s find %s]] = 0) do={ %s add %s %s }\n", path, selector, path, create, update)
 	fmt.Fprintf(b, "%s set [find %s] %s\n", path, selector, update)
-}
-
-// RenderScheduler returns the switch script and the scheduler that runs it.
-// They hold no tunnel state, so replacing them outright is safe.
-func RenderScheduler(in Input) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "/system scheduler remove [find name=%s]\n", switchName)
-	fmt.Fprintf(&b, "/system script remove [find name=%s]\n", switchName)
-	fmt.Fprintf(&b, "/system script add name=%s policy=%s comment=%s source=%s\n",
-		switchName, policy, str(tag), str(SwitchSource(in)))
-	fmt.Fprintf(&b, "/system scheduler add name=%s interval=%s policy=%s comment=%s on-event=%s\n",
-		switchName, interval, policy, str(tag), str("/system script run "+switchName))
-	return b.String()
-}
-
-// switchBody is the switch script. :tostr is there because an IP endpoint may
-// come back typed as ip, which never equals the host string in the list. The
-// fail mark is tested apart from the subtraction because RouterOS does not
-// short-circuit, and subtracting a missing mark from a timestamp is an error.
-const switchBody = `:global nmVpnFail
-:if ([:typeof $nmVpnFail] != "array") do={ :set nmVpnFail [:toarray ""] }
-:local servers {@SERVERS@}
-:if ([/ping @CORE@ src-address=@ADDR@ count=@COUNT@ interval=1s] < @OK@) do={
-  :local cur [:tostr [/interface wireguard peers get [find interface=@IFACE@] endpoint-address]]
-  :set ($nmVpnFail->$cur) [:timestamp]
-  :local n [:len $servers]
-  :local idx -1
-  :for i from=0 to=($n - 1) do={
-    :local s [:pick $servers $i]
-    :if ([:pick $s 0 [:find $s "|"]] = $cur) do={ :set idx $i }
-  }
-  :local next ""
-  :for k from=1 to=$n do={
-    :local s [:pick $servers (($idx + $k) % $n)]
-    :local h [:pick $s 0 [:find $s "|"]]
-    :local t ($nmVpnFail->$h)
-    :local fresh false
-    :if ([:typeof $t] = "time") do={ :set fresh (([:timestamp] - $t) < @HOLD@) }
-    :if (($next = "") && ($fresh = false)) do={ :set next $s }
-  }
-  :if ($next = "") do={ :set next [:pick $servers 0] }
-  :local p [:find $next "|"]
-  :local host [:pick $next 0 $p]
-  :local rest [:pick $next ($p + 1) [:len $next]]
-  :set p [:find $rest "|"]
-  :if ($host != $cur) do={
-    /interface wireguard peers set [find interface=@IFACE@] endpoint-address=$host endpoint-port=[:tonum [:pick $rest 0 $p]] public-key=[:pick $rest ($p + 1) [:len $rest]]
-    :log warning ("@TAG@: pindah ke " . $host)
-  }
-}
-`
-
-// SwitchSource returns the switch script body unescaped, for netmanager to
-// replace the server list through the API (/system/script/set source=).
-//
-// When the core stops answering, the current hub is marked failed for
-// failHold and the peer moves to the next unmarked hub in list order, or to
-// the first when all are marked. There is deliberately no return to the first
-// hub: a flapping first hub would otherwise pull the router back and forth.
-func SwitchSource(in Input) string {
-	entries := make([]string, len(in.Servers))
-	for i, s := range in.Servers {
-		entries[i] = str(s.Host + sep + strconv.Itoa(s.Port) + sep + s.PublicKey)
-	}
-	return strings.NewReplacer(
-		"@SERVERS@", strings.Join(entries, ";"),
-		"@CORE@", coreAddr,
-		"@ADDR@", in.Address.String(),
-		"@COUNT@", strconv.Itoa(pingCount),
-		"@OK@", strconv.Itoa(pingOK),
-		"@IFACE@", ifaceName,
-		"@HOLD@", failHold,
-		"@TAG@", tag,
-	).Replace(switchBody)
 }
 
 func str(s string) string { return `"` + quote(s) + `"` }

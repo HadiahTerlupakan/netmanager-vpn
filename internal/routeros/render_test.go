@@ -87,12 +87,96 @@ func TestRenderIsIdempotentShape(t *testing.T) {
 	}
 }
 
-func TestRenderFullDoesNotMoveExistingPeer(t *testing.T) {
-	for _, line := range strings.Split(RenderFull(testInput()), "\n") {
-		if strings.HasPrefix(line, "/interface wireguard peers set") &&
-			(strings.Contains(line, "endpoint-address=") || strings.Contains(line, "public-key=")) {
-			t.Fatalf("re-paste would move the peer off its current hub: %s", line)
+func lines(s string) []string { return strings.Split(s, "\n") }
+
+func TestRenderFullMovesPeerOnlyOffUnlistedHub(t *testing.T) {
+	in := testInput()
+	guard := `:local list {` + serverList(in) + `}; :if ([:typeof [:find $list $cur]] != "num") do={ /interface wireguard peers set $id endpoint-address=`
+	found := false
+	for _, line := range lines(RenderFull(in)) {
+		// The switch script's source moves the peer by design; only the
+		// paste-time lines are under test here.
+		if strings.HasPrefix(line, "/system ") || !strings.Contains(line, "peers set") ||
+			!strings.Contains(line, "endpoint-address=") {
+			continue
 		}
+		if !strings.Contains(line, guard) {
+			t.Errorf("existing peer moved without checking the list: %s", line)
+		}
+		for _, prop := range []string{"endpoint-address]", "endpoint-port]", "public-key]"} {
+			if !strings.Contains(line, "peers get $id "+prop) {
+				t.Errorf("current hub not compared on %s: %s", prop, line)
+			}
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no check moves a peer off an unlisted hub")
+	}
+}
+
+func TestRenderSetsPrivateKeyOnlyWhenChanged(t *testing.T) {
+	for _, line := range lines(RenderFull(testInput())) {
+		if strings.Contains(line, "wireguard set") && strings.Contains(line, "private-key=") &&
+			!strings.HasPrefix(line, ":if ([/interface wireguard get [find name=netmanager-vpn] private-key] != ") {
+			t.Errorf("private key re-set unconditionally: %s", line)
+		}
+	}
+}
+
+func TestRenderPutsRulesFirst(t *testing.T) {
+	out := RenderFull(testInput())
+	route := strings.Index(out, "/ip route")
+	for _, s := range []string{"10.99.0.0/24", "10.99.128.0/24"} {
+		sel := `[/routing rule find comment="netmanager-vpn" dst-address=` + s + `]`
+		place := strings.Index(out, `:if ([:len `+sel+`] = 0) do={ :if ([:len [/routing rule find]] = 0) do={ /routing rule add dst-address=`+s)
+		before := strings.Index(out, "place-before=([/routing rule find]->0)")
+		move := strings.Index(out, "/routing rule move [find "+sel[len("[/routing rule find "):len(sel)-1]+"] destination=([/routing rule find]->0)")
+		if place < 0 || before < 0 || move < 0 || place > route || move > route {
+			t.Errorf("%s: place=%d place-before=%d move=%d route=%d", s, place, before, move, route)
+		}
+	}
+}
+
+func TestSwitchGraceGuardsPing(t *testing.T) {
+	src := SwitchSource(testInput())
+	guard := strings.Index(src, `:if ([:typeof $nmVpnSwitchAt] = "time") do={ :if (($now - $nmVpnSwitchAt) < 00:01:00) do={ :set settled false } }`)
+	settled := strings.Index(src, ":if ($settled) do={")
+	ping := strings.Index(src, "/ping ")
+	set := strings.Index(src, "peers set $id")
+	stamp := strings.Index(src, ":set nmVpnSwitchAt $now")
+	if guard < 0 || !(guard < settled && settled < ping) {
+		t.Errorf("grace must gate the ping (guard=%d settled=%d ping=%d)", guard, settled, ping)
+	}
+	if set < 0 || stamp < set {
+		t.Errorf("switch must start the grace (set=%d stamp=%d)", set, stamp)
+	}
+}
+
+func TestSwitchNeedsTwoFailedChecks(t *testing.T) {
+	src := SwitchSource(testInput())
+	count := strings.Index(src, ">= 4) do={ :set nmVpnFailCount 0 } else={ :set nmVpnFailCount ($nmVpnFailCount + 1) }")
+	gate := strings.Index(src, ":if ($nmVpnFailCount >= 2) do={\n    :set nmVpnFailCount 0")
+	mark := strings.Index(src, ":set ($nmVpnFail->$curHost) $now")
+	set := strings.Index(src, "peers set $id")
+	if count < 0 || gate < 0 || !(count < gate && gate < mark && mark < set) {
+		t.Errorf("count=%d gate=%d mark=%d set=%d", count, gate, mark, set)
+	}
+}
+
+func TestSwitchUsesUptime(t *testing.T) {
+	src := SwitchSource(testInput())
+	if strings.Contains(src, ":timestamp") || !strings.Contains(src, ":local now [/system resource get uptime]") {
+		t.Fatalf("switch must time marks by uptime:\n%s", src)
+	}
+}
+
+func TestSwitchComparesFullEntry(t *testing.T) {
+	src := SwitchSource(testInput())
+	cur := `:local cur ([:tostr [/interface wireguard peers get $id endpoint-address]] . "|" . [/interface wireguard peers get $id endpoint-port] . "|" . [/interface wireguard peers get $id public-key])`
+	if !strings.Contains(src, cur) || !strings.Contains(src, ":local idx [:find $servers $cur]") ||
+		!strings.Contains(src, ":if ($next != $cur) do={") {
+		t.Fatalf("current hub not matched on host, port and key:\n%s", src)
 	}
 }
 
@@ -137,6 +221,11 @@ func TestValidateRejectsBadInput(t *testing.T) {
 		"port too high": func(in *Input) { in.Servers[0].Port = 65536 },
 		"empty pubkey":  func(in *Input) { in.Servers[0].PublicKey = "" },
 		"pipe in host":  func(in *Input) { in.Servers[0].Host = "a|b" },
+		"space in host": func(in *Input) { in.Servers[0].Host = "hub a.example.net" },
+		"url as host":   func(in *Input) { in.Servers[0].Host = "https://hub-a.example.net" },
+		"host and port": func(in *Input) { in.Servers[0].Host = "hub-a.example.net:51821" },
+		"ipv6 host":     func(in *Input) { in.Servers[0].Host = "2001:db8::1" },
+		"bad label":     func(in *Input) { in.Servers[0].Host = "-hub.example.net" },
 		"pipe in key":   func(in *Input) { in.Servers[1].PublicKey = "a|b" },
 	}
 	for name, mutate := range cases {
