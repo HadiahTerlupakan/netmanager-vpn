@@ -22,9 +22,9 @@ CABANG_PRODUKSI="main"
 NAMESPACE="netmanager-vpn"
 REGISTRY="ghcr.io/hadiahterlupakan"
 DIR_CADANGAN="/var/backups/netmanager-vpn"
-# Direktori kunci milik root lalu diserahkan ke pengguna deploy dengan mode 700:
-# /tmp bisa diisi symlink oleh pengguna lain.
-DIR_KUNCI="/run/lock/netmanager-vpn"
+# Direktori kunci di bawah /run (755, milik root), bukan /tmp atau /run/lock
+# yang bisa ditulisi semua orang dan diisi symlink untuk membelokkan `install`.
+DIR_KUNCI="/run/netmanager-vpn-deploy"
 BERKAS_KUNCI="${DIR_KUNCI}/deploy.lock"
 CADANGAN_TERBARU_MENIT=1500
 BATAS_ROLLOUT="180s"
@@ -46,7 +46,12 @@ fi
 [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]] || gagal "Masukan harus SHA commit 40 karakter heksadesimal"
 
 # Satu deploy dalam satu waktu; deploy kedua menunggu giliran.
+if [ -L "${DIR_KUNCI}" ] || { [ -e "${DIR_KUNCI}" ] && [ ! -d "${DIR_KUNCI}" ]; }; then
+  gagal "${DIR_KUNCI} symlink atau bukan direktori; deploy ditolak"
+fi
 sudo -n install -d -o "$(id -u)" -m 700 "${DIR_KUNCI}"
+[ "$(stat -c '%u %a' "${DIR_KUNCI}")" = "$(id -u) 700" ] \
+  || gagal "${DIR_KUNCI} bukan milik pengguna deploy dengan mode 700"
 [ ! -L "${BERKAS_KUNCI}" ] || gagal "${BERKAS_KUNCI} adalah symlink; deploy ditolak"
 exec 9>> "${BERKAS_KUNCI}"
 echo "Menunggu giliran deploy..."
@@ -91,20 +96,34 @@ for rahasia in netmanager-vpn-secrets netmanager-vpn-registry; do
 done
 
 # Image dicek dengan kredensial pull cluster sendiri, sehingga yang lolos di
-# sini pasti bisa ditarik kubelet.
-KREDENSIAL_PULL="$(${K} get secret netmanager-vpn-registry -o jsonpath='{.data.\.dockerconfigjson}' \
-  | base64 -d | jq -r '.auths | to_entries[0].value | .username + ":" + .password')"
+# sini pasti bisa ditarik kubelet. Kredensial dan token lewat konfigurasi curl
+# di stdin, bukan argv, supaya tidak terbaca dari ps; nilai yang memuat `"`
+# atau `\` ditolak karena merusak baris konfigurasi.
+aman_untuk_curl() {
+  case "$1" in
+    *'"'* | *'\'* | *$'\n'*) return 1 ;;
+  esac
+}
+KONFIG_DOCKER="$(${K} get secret netmanager-vpn-registry -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d)" \
+  || gagal "Secret netmanager-vpn-registry tidak terbaca"
+KREDENSIAL_PULL="$(jq -r '.auths | to_entries[0].value | if .username then .username + ":" + .password else (.auth | @base64d) end' <<< "${KONFIG_DOCKER}")" \
+  || gagal "Kredensial di netmanager-vpn-registry tidak bisa diurai"
+[ -n "${KREDENSIAL_PULL}" ] && [ "${KREDENSIAL_PULL}" != "null" ] \
+  || gagal "netmanager-vpn-registry tidak memuat kredensial"
+aman_untuk_curl "${KREDENSIAL_PULL}" || gagal "Kredensial registry memuat karakter terlarang"
 REPO_IMAGE="${REGISTRY#ghcr.io/}/netmanager-vpn"
-TOKEN_REGISTRY="$(curl -fsS -u "${KREDENSIAL_PULL}" "https://ghcr.io/token?scope=repository:${REPO_IMAGE}:pull" | jq -r .token)" \
+TOKEN_REGISTRY="$(printf 'user = "%s"\n' "${KREDENSIAL_PULL}" \
+  | curl -fsS -K - "https://ghcr.io/token?scope=repository:${REPO_IMAGE}:pull" | jq -r .token)" \
   || gagal "Token registry tidak didapat; kredensial netmanager-vpn-registry salah?"
-curl -fsS -o /dev/null \
-  -H "Authorization: Bearer ${TOKEN_REGISTRY}" \
-  -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
-  "https://ghcr.io/v2/${REPO_IMAGE}/manifests/${TAG}" \
+aman_untuk_curl "${TOKEN_REGISTRY}" || gagal "Token registry memuat karakter terlarang"
+printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"\n' "${TOKEN_REGISTRY}" \
+  | curl -fsS -K - -o /dev/null "https://ghcr.io/v2/${REPO_IMAGE}/manifests/${TAG}" \
   || gagal "Image netmanager-vpn:${TAG} tidak ada di registry; build belum selesai?"
 echo "Image tersedia."
 
-# Cadangan lewat core yang sedang berjalan. Core yang crash-loop tidak bisa
+# Cadangan lewat core yang sedang berjalan. DIR_CADANGAN adalah hostPath yang
+# sama yang ditulis backup di dalam pod dan oleh CronJob (core.yaml memasangnya
+# di keduanya), jadi pencarian salinan segar di host melihat file yang sama. Core yang crash-loop tidak bisa
 # di-exec, padahal deploy perbaikannya justru yang dibutuhkan; maka salinan
 # harian yang masih segar (CronJob) dianggap cukup.
 if ${K} get deploy/netmanager-vpn > /dev/null 2>&1; then

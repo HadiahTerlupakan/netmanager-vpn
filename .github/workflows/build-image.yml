@@ -54,18 +54,13 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          load: true
+          outputs: type=docker
           tags: ${{ steps.tag.outputs.image }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Image menampilkan flag -mode
         run: docker run --rm "${{ steps.tag.outputs.image }}" -h 2>&1 | grep -- '-mode'
+      # Mendorong image lokal yang barusan lolos cek, bukan membangun ulang.
       - name: Dorong image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.tag.outputs.image }}
-          labels: org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
+        run: docker push "${{ steps.tag.outputs.image }}"

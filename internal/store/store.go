@@ -221,17 +221,29 @@ func affected(res sql.Result, err error) error {
 	return nil
 }
 
+// vacuumInto is a variable so a test can simulate a VACUUM that dies after
+// creating its output file.
+var vacuumInto = func(db *sql.DB, path string) error {
+	_, err := db.Exec(`VACUUM INTO ?`, path)
+	return err
+}
+
 // BackupTo writes a consistent copy of the database to path. VACUUM INTO is
 // used instead of copying the file because the live database is in WAL mode,
 // where a plain copy can miss pages still in the -wal file. path must not
-// exist; a failed attempt leaves no partial file behind.
+// exist; a failed attempt leaves no partial file behind. Because path was
+// absent on entry, any file there after a failure is this call's own.
 func (s *Store) BackupTo(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("store: backup: %s already exists", path)
 	}
-	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("store: backup: %w", err)
+	err := vacuumInto(s.db, path)
+	if err == nil {
+		return nil
 	}
-	return nil
+	err = fmt.Errorf("store: backup: %w", err)
+	if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		err = errors.Join(err, fmt.Errorf("remove partial backup: %w", rmErr))
+	}
+	return err
 }

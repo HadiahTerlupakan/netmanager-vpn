@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -508,11 +509,19 @@ func TestBackupToCopiesStateAndRefusesOverwrite(t *testing.T) {
 	}
 }
 
-func TestBackupToFailureLeavesNoPartialFile(t *testing.T) {
+func TestBackupToRemovesPartialFileOnFailure(t *testing.T) {
 	s := openTemp(t)
-	dst := filepath.Join(t.TempDir(), "missing-dir", "backup.db")
+	dst := filepath.Join(t.TempDir(), "backup.db")
+	orig := vacuumInto
+	vacuumInto = func(_ *sql.DB, path string) error {
+		if err := os.WriteFile(path, []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() { vacuumInto = orig })
 	if err := s.BackupTo(dst); err == nil {
-		t.Fatal("backup into a missing directory succeeded")
+		t.Fatal("failed VACUUM reported success")
 	}
 	if _, err := os.Stat(dst); err == nil {
 		t.Fatal("partial file left behind")
