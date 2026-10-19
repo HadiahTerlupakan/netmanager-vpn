@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -21,6 +22,9 @@ const (
 	coreAddress = "10.99.0.1/24"
 	corePort    = 51822
 	coreMTU     = 1380
+	// healthWindow is how stale the last good reconcile may be; the active pass
+	// runs every 10 s, so a minute means several missed passes.
+	healthWindow = 60 * time.Second
 )
 
 // ErrValidation marks input the caller can fix.
@@ -55,6 +59,8 @@ type Core struct {
 	// afterAdminTaken lets a test slip a competing insert between the address
 	// lookup and the insert, which cannot be timed reliably with goroutines.
 	afterAdminTaken func()
+	// okAt is the unix-nano time of the last successful apply or active pass.
+	okAt atomic.Int64
 }
 
 // New builds a Core. A nil cfg.Now means time.Now.
@@ -137,7 +143,17 @@ func (c *Core) applyCore() error {
 	if err := c.dev.Apply(cfg); err != nil {
 		return fmt.Errorf("core: apply %s: %w", ifaceCore, err)
 	}
+	c.markOK()
 	return nil
+}
+
+func (c *Core) markOK() { c.okAt.Store(c.cfg.Now().UnixNano()) }
+
+// Healthy reports whether wg-core was applied or an active pass finished
+// within healthWindow of now.
+func (c *Core) Healthy(now time.Time) bool {
+	at := c.okAt.Load()
+	return at != 0 && now.Sub(time.Unix(0, at)) < healthWindow
 }
 
 // routedAddrs lists, per hub, the /32 of every router currently active on it.

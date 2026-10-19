@@ -19,11 +19,11 @@ const maxAdminLabel = 64
 // AdminPeer is an operator device as shown to callers. It has no private key
 // field on purpose: the key leaves only through AdminConfig.
 type AdminPeer struct {
-	ID        string
-	Label     string
-	Address   netip.Addr
-	PublicKey string
-	CreatedAt time.Time
+	ID        string     `json:"id"`
+	Label     string     `json:"label"`
+	Address   netip.Addr `json:"address"`
+	PublicKey string     `json:"publicKey"`
+	CreatedAt time.Time  `json:"createdAt"`
 }
 
 func adminView(p store.AdminPeer) AdminPeer {

@@ -21,24 +21,30 @@ const (
 
 // RouterView is a router as shown to operators.
 type RouterView struct {
-	ID, Label, Ref, Address, Status string
-	Hubs                            []RouterHub
-	ActiveHubID                     *string
-	LastHandshakeAt                 *time.Time
-	Events                          []RouterEvent
+	ID              string        `json:"id"`
+	Label           string        `json:"label"`
+	Ref             string        `json:"ref"`
+	Address         string        `json:"address"`
+	Status          string        `json:"status"`
+	Hubs            []RouterHub   `json:"hubs"`
+	ActiveHubID     *string       `json:"activeHubId"`
+	LastHandshakeAt *time.Time    `json:"lastHandshakeAt"`
+	Events          []RouterEvent `json:"events"`
 }
 
 // RouterHub is one entry of a router's ordered server list.
 type RouterHub struct {
-	HubID, Name string
-	Priority    int
-	SyncState   string
+	HubID     string `json:"hubId"`
+	Name      string `json:"name"`
+	Priority  int    `json:"priority"`
+	SyncState string `json:"syncState"`
 }
 
 // RouterEvent is a change of the hub carrying a router.
 type RouterEvent struct {
-	FromHubID, ToHubID *string
-	At                 time.Time
+	FromHubID *string   `json:"fromHubId"`
+	ToHubID   *string   `json:"toHubId"`
+	At        time.Time `json:"at"`
 }
 
 // CreateRouter registers one keypair and /32 on every listed hub, so the

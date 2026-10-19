@@ -31,13 +31,13 @@ var hostnameRE = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9]
 
 // HubView is a hub as shown to operators.
 type HubView struct {
-	ID          string
-	Name        string
-	PublicHost  string
-	ListenPort  int
-	Status      string
-	RouterCount int
-	LastSeenAt  *time.Time
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	PublicHost  string     `json:"publicHost"`
+	ListenPort  int        `json:"listenPort"`
+	Status      string     `json:"status"`
+	RouterCount int        `json:"routerCount"`
+	LastSeenAt  *time.Time `json:"lastSeenAt"`
 }
 
 // CreateHub registers a hub and returns the command the operator runs on it.

@@ -65,7 +65,9 @@ func (c *Core) RunActiveLoop(ctx context.Context, interval time.Duration) {
 		case <-t.C:
 			if err := c.tick(ctx); err != nil {
 				slog.Error("active hub pass failed", "err", err)
+				continue
 			}
+			c.markOK()
 		}
 	}
 }
