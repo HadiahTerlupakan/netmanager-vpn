@@ -31,8 +31,17 @@ func TestRenderCoreMatchesGolden(t *testing.T) {
 
 func TestRulesetsAreStateless(t *testing.T) {
 	for name, rs := range map[string]string{"hub": RenderHub(), "core": RenderCore()} {
-		if strings.Contains(rs, "ct state") {
-			t.Errorf("%s ruleset must not track connections", name)
+		if strings.Contains(rs, "ct ") {
+			t.Errorf("%s ruleset must not use conntrack", name)
 		}
+	}
+}
+
+func TestHubDropsRouterInitiatedTCP(t *testing.T) {
+	rs := RenderHub()
+	drop := strings.Index(rs, `iifname "wg-nm" tcp flags & (syn | ack) == syn drop`)
+	accept := strings.Index(rs, "tcp sport { 8728, 8291, 22 } accept")
+	if drop < 0 || accept < 0 || drop > accept {
+		t.Fatalf("bare-SYN drop must precede the sport accept (drop=%d accept=%d)", drop, accept)
 	}
 }

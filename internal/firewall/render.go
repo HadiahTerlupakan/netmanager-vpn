@@ -16,12 +16,14 @@ table inet netmanager_vpn {
 
 // Chains use policy accept because they share hooks with other software's
 // tables; we only drop what we own. No rule tracks connections: the hub keeps
-// no state, so replies are matched by port.
+// no state, so replies are matched by port. A bare SYN from wg-nm is dropped
+// first because the source port alone would let a router open connections.
 const (
 	hubForward = `	chain forward {
 		type filter hook forward priority 0; policy accept;
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "wg-nm" tcp flags & (syn | ack) == syn drop
 		iifname "wg-nm" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
 		iifname "wg-nm" drop
 		iifname "wg-up" oifname "wg-nm" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
