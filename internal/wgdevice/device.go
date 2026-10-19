@@ -35,4 +35,8 @@ type PeerStatus struct {
 type Device interface {
 	Apply(cfg Config) error
 	Status(iface string) ([]PeerStatus, error)
+	// EnsureUnreachable installs an unreachable route for prefix if none is
+	// there, so packets for an address no peer carries fail locally instead of
+	// leaving through the default route.
+	EnsureUnreachable(prefix string) error
 }

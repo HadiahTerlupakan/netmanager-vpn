@@ -351,3 +351,12 @@ func TestTickReusesLastHandshakesWhenHubPeersFail(t *testing.T) {
 		t.Fatalf("want a move to none once the stamp aged, got %+v", evs)
 	}
 }
+
+// Traffic for a router no hub carries must not leave radpro by its default
+// route; the unreachable route answers it locally instead.
+func TestInitBlackholesRouterPool(t *testing.T) {
+	f := newFixture(t)
+	if got := f.dev.Unreachable(); !slices.Equal(got, []string{"10.100.0.0/14"}) {
+		t.Fatalf("unreachable routes = %v", got)
+	}
+}

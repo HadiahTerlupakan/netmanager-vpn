@@ -23,3 +23,7 @@ func (unsupported) Apply(Config) error {
 func (unsupported) Status(string) ([]PeerStatus, error) {
 	return nil, errUnsupported
 }
+
+func (unsupported) EnsureUnreachable(string) error {
+	return errUnsupported
+}

@@ -197,3 +197,29 @@ func (linuxDevice) Status(interfaceName string) ([]PeerStatus, error) {
 	}
 	return statuses, nil
 }
+
+// EnsureUnreachable adds the route only when the main table has none for
+// prefix. Another route on exactly that prefix is reported, not replaced: it
+// was put there by someone else and must not be silently taken over.
+func (linuxDevice) EnsureUnreachable(prefix string) error {
+	_, dst, err := net.ParseCIDR(prefix)
+	if err != nil {
+		return fmt.Errorf("parse prefix %s: %w", prefix, err)
+	}
+	existing, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Dst: dst}, netlink.RT_FILTER_DST)
+	if err != nil {
+		return fmt.Errorf("list routes for %s: %w", prefix, err)
+	}
+	for _, r := range existing {
+		if r.Type == syscall.RTN_UNREACHABLE {
+			return nil
+		}
+	}
+	if len(existing) > 0 {
+		return fmt.Errorf("%s is already routed by another route; remove it so unrouted routers fail locally", prefix)
+	}
+	if err := netlink.RouteAdd(&netlink.Route{Dst: dst, Type: syscall.RTN_UNREACHABLE}); err != nil {
+		return fmt.Errorf("add unreachable %s: %w", prefix, err)
+	}
+	return nil
+}

@@ -12,6 +12,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/ipam"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/wgdevice"
@@ -85,6 +86,9 @@ func New(dev wgdevice.Device, st *store.Store, box *secret.Box, hubs HubClient, 
 func (c *Core) Init() error {
 	if _, err := c.corePrivateKey(); err != nil {
 		return err
+	}
+	if err := c.dev.EnsureUnreachable(ipam.RouterPool.String()); err != nil {
+		return fmt.Errorf("core: blackhole router pool: %w", err)
 	}
 	active, err := c.st.ActiveHubs()
 	if err != nil {
