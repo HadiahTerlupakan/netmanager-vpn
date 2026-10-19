@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -17,7 +18,15 @@ const (
 	// look healthy; the core keeps the current hub unless another is clearly
 	// ahead, so wg-core is not rebuilt every cycle for a coin flip.
 	stickyMargin = 30 * time.Second
+	// Hub clocks drift; a little skew is tolerated, but a stamp further ahead
+	// would otherwise win as "newest" and hold a router on a dead hub.
+	maxFutureSkew = 5 * time.Second
 )
+
+func usable(at, now time.Time) bool {
+	d := now.Sub(at)
+	return d >= -maxFutureSkew && d < freshWindow
+}
 
 // ChooseActive picks the hub carrying a router from the handshakes each hub
 // saw for it. It returns nil when no handshake is fresh.
@@ -26,7 +35,7 @@ func ChooseActive(handshakes map[string]time.Time, current *string, now time.Tim
 	var bestAt time.Time
 	found := false
 	for hub, at := range handshakes {
-		if now.Sub(at) >= freshWindow {
+		if !usable(at, now) {
 			continue
 		}
 		// Map order is random; the smallest ID on a tie keeps the result stable.
@@ -38,7 +47,7 @@ func ChooseActive(handshakes map[string]time.Time, current *string, now time.Tim
 		return nil
 	}
 	if current != nil {
-		if at, ok := handshakes[*current]; ok && now.Sub(at) < freshWindow && bestAt.Sub(at) <= stickyMargin {
+		if at, ok := handshakes[*current]; ok && usable(at, now) && bestAt.Sub(at) <= stickyMargin {
 			return current
 		}
 	}
@@ -70,7 +79,9 @@ type hubMove struct {
 
 // tick runs one pass. The status refresh comes first so a hub that
 // handshook just before its join expired is persisted online before any
-// applyCore can drop it.
+// applyCore can drop it. Each hub's Peers call is bounded by the HubClient's
+// own timeout (5 s for the HTTP client), so one slow hub delays a pass by at
+// most that.
 func (c *Core) tick(ctx context.Context) error {
 	if err := c.RefreshHubStatuses(); err != nil {
 		return err
@@ -159,6 +170,16 @@ func (c *Core) commitChoices(routers []store.Router, seen map[string]map[string]
 	now := c.cfg.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	live := make(map[string]bool, len(routers))
+	for _, r := range routers {
+		live[r.ID] = true
+	}
+	for id := range c.active {
+		if !live[id] {
+			delete(c.active, id)
+			delete(c.handshakes, id)
+		}
+	}
 	var moves []hubMove
 	for _, r := range routers {
 		var cur *string
@@ -184,11 +205,16 @@ func (c *Core) commitChoices(routers []store.Router, seen map[string]map[string]
 }
 
 // revert undoes a failed apply so the next pass sees the same change again
-// instead of believing the kernel already has it.
+// instead of believing the kernel already has it. A router whose entry no
+// longer matches what this pass set was changed meanwhile (forgetActive,
+// DeleteRouter) and is left alone.
 func (c *Core) revert(moves []hubMove) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, m := range moves {
+		if now, ok := c.active[m.routerID]; (m.to == "" && ok) || (m.to != "" && now != m.to) {
+			continue
+		}
 		if m.hadPrev {
 			c.active[m.routerID] = m.from
 			c.handshakes[m.routerID] = m.prevAt
@@ -203,10 +229,11 @@ func (c *Core) revert(moves []hubMove) {
 // move the kernel did not get.
 func (c *Core) recordMoves(moves []hubMove) error {
 	now := c.cfg.Now()
+	var errs []error
 	for _, m := range moves {
 		if err := c.st.AddRouterEvent(m.routerID, m.from, m.to, now); err != nil {
-			return fmt.Errorf("core: record move of %s: %w", m.routerID, err)
+			errs = append(errs, fmt.Errorf("core: record move of %s: %w", m.routerID, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

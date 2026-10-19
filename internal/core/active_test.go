@@ -34,6 +34,10 @@ func TestChooseActive(t *testing.T) {
 		{"current absent from handshakes", map[string]time.Time{"A": ago(5)}, ptr("B"), ptr("A")},
 		{"tie without current picks smallest id", map[string]time.Time{"B": ago(5), "A": ago(5)}, nil, ptr("A")},
 		{"tie keeps current", map[string]time.Time{"B": ago(5), "A": ago(5)}, ptr("B"), ptr("B")},
+		{"future handshake alone", map[string]time.Time{"A": now.Add(time.Minute)}, nil, nil},
+		{"future handshake loses to a real one", map[string]time.Time{"A": now.Add(time.Minute), "B": ago(20)}, nil, ptr("B")},
+		{"current with a future stamp not kept", map[string]time.Time{"A": ago(5), "B": now.Add(time.Minute)}, ptr("B"), ptr("A")},
+		{"small skew tolerated", map[string]time.Time{"A": now.Add(3 * time.Second)}, nil, ptr("A")},
 		{"stale current and nothing fresh", map[string]time.Time{"B": ago(300)}, ptr("B"), nil},
 	}
 	for _, tc := range tests {
@@ -86,10 +90,14 @@ func (h *handshakeHubs) Peers(_ context.Context, hub store.Hub) ([]HubPeerStatus
 
 type applyToggleDevice struct {
 	wgdevice.Device
-	fail bool
+	fail    bool
+	onApply func()
 }
 
 func (d *applyToggleDevice) Apply(cfg wgdevice.Config) error {
+	if d.onApply != nil {
+		d.onApply()
+	}
 	if d.fail {
 		return errors.New("kernel refused")
 	}
@@ -241,5 +249,42 @@ func TestTickNoEventWhenApplyFails(t *testing.T) {
 	e.tick(t)
 	if evs, _ := e.f.st.ListRouterEvents(e.router.ID, 10); len(evs) != 1 {
 		t.Fatalf("next tick should retry and record once, got %+v", evs)
+	}
+}
+
+func TestRevertLeavesConcurrentForgetAlone(t *testing.T) {
+	e := activeFixture(t, 0, 1)
+	e.hubs.set(e.hub[0].ID, e.router.PublicKey, testNow.Add(-5*time.Second))
+	e.tick(t)
+	dev := &applyToggleDevice{Device: e.f.dev, fail: true}
+	e.f.core.dev = dev
+	e.hubs.set(e.hub[1].ID, e.router.PublicKey, testNow.Add(time.Second))
+	e.hubs.set(e.hub[0].ID, e.router.PublicKey, testNow.Add(-100*time.Second))
+	dev.onApply = func() { e.f.core.forgetActive(e.router.ID, e.hub[1].ID) }
+	if err := e.f.core.tick(context.Background()); err == nil {
+		t.Fatal("tick should report the apply failure")
+	}
+	e.f.core.mu.Lock()
+	_, ok := e.f.core.active[e.router.ID]
+	e.f.core.mu.Unlock()
+	if ok {
+		t.Fatal("revert resurrected a router forgotten during the pass")
+	}
+}
+
+func TestCommitPrunesGhostRouters(t *testing.T) {
+	e := activeFixture(t, 0, 1)
+	e.f.core.mu.Lock()
+	e.f.core.active["gone"] = e.hub[0].ID
+	e.f.core.handshakes["gone"] = testNow
+	e.f.core.mu.Unlock()
+	e.tick(t)
+	e.f.core.mu.Lock()
+	defer e.f.core.mu.Unlock()
+	if _, ok := e.f.core.active["gone"]; ok {
+		t.Fatal("ghost active entry kept")
+	}
+	if _, ok := e.f.core.handshakes["gone"]; ok {
+		t.Fatal("ghost handshake kept")
 	}
 }
