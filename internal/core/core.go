@@ -52,6 +52,9 @@ type Core struct {
 	// regMu serializes registry rewrites (status refresh, join reissue) so a
 	// stale snapshot cannot overwrite a freshly reissued hub.
 	regMu sync.Mutex
+	// afterAdminTaken lets a test slip a competing insert between the address
+	// lookup and the insert, which cannot be timed reliably with goroutines.
+	afterAdminTaken func()
 }
 
 // New builds a Core. A nil cfg.Now means time.Now.

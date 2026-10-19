@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -29,8 +31,11 @@ func adminView(p store.AdminPeer) AdminPeer {
 }
 
 // CreateAdminPeer registers a device that can reach routers through wg-core.
+// A freed address is reused at once, unlike a router's: every device gets a new
+// key and wg-core authenticates by key, so only a router's nas.nasname in
+// netmanager makes a quick reuse unsafe.
 func (c *Core) CreateAdminPeer(label string) (AdminPeer, error) {
-	if label == "" || len(label) > maxAdminLabel {
+	if n := utf8.RuneCountInString(label); strings.TrimSpace(label) == "" || n > maxAdminLabel {
 		return AdminPeer{}, fmt.Errorf("%w: label must be 1-%d characters", ErrValidation, maxAdminLabel)
 	}
 	key, err := wgtypes.GeneratePrivateKey()
@@ -59,6 +64,9 @@ func (c *Core) storeNewAdmin(label, public, sealed string) (store.AdminPeer, err
 		if err != nil {
 			return store.AdminPeer{}, err
 		}
+		if c.afterAdminTaken != nil {
+			c.afterAdminTaken()
+		}
 		addr, err := ipam.Allocate(ipam.AdminPool, ipam.AdminFirst, ipam.AdminLast, taken, c.cfg.Now())
 		if err != nil {
 			return store.AdminPeer{}, fmt.Errorf("core: allocate admin address: %w", err)
@@ -72,10 +80,14 @@ func (c *Core) storeNewAdmin(label, public, sealed string) (store.AdminPeer, err
 }
 
 // rollbackAdmin removes a peer whose wg-core registration failed, so no
-// invisible peer or leaked admin address is left behind.
+// invisible peer or leaked admin address is left behind. It re-applies so a
+// device that took the half-applied peer drops it.
 func (c *Core) rollbackAdmin(id string, cause error) error {
 	if err := c.st.DeleteAdminPeer(id); err != nil {
 		return errors.Join(cause, fmt.Errorf("core: roll back admin peer: %w", err))
+	}
+	if err := c.applyCore(); err != nil {
+		return errors.Join(cause, err)
 	}
 	return cause
 }
@@ -110,12 +122,21 @@ func (c *Core) renderAdminConfig(p store.AdminPeer) (string, error) {
 		ipam.BackhaulPool, ipam.RouterPool), nil
 }
 
-// DeleteAdminPeer removes a device and drops its wg-core peer.
+// DeleteAdminPeer removes a device and drops its wg-core peer. It applies even
+// when the row is already gone: a delete whose apply failed leaves the device
+// live on wg-core, and only a retry that still reaches applyCore revokes it.
 func (c *Core) DeleteAdminPeer(id string) error {
-	if err := c.st.DeleteAdminPeer(id); err != nil {
-		return fmt.Errorf("core: delete admin peer: %w", err)
+	delErr := c.st.DeleteAdminPeer(id)
+	if delErr != nil && !errors.Is(delErr, store.ErrNotFound) {
+		return fmt.Errorf("core: delete admin peer: %w", delErr)
 	}
-	return c.applyCore()
+	if err := c.applyCore(); err != nil {
+		return err
+	}
+	if delErr != nil {
+		return fmt.Errorf("core: delete admin peer: %w", delErr)
+	}
+	return nil
 }
 
 // ListAdminPeers returns every admin device, oldest first.

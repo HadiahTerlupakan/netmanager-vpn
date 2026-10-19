@@ -32,7 +32,7 @@ func TestAdminPeerAllocatesFromAdminPool(t *testing.T) {
 
 func TestCreateAdminPeerValidation(t *testing.T) {
 	f := newFixture(t)
-	for _, label := range []string{"", strings.Repeat("a", 65)} {
+	for _, label := range []string{"", "   ", strings.Repeat("a", 65), strings.Repeat("é", 65)} {
 		if _, err := f.core.CreateAdminPeer(label); !errors.Is(err, ErrValidation) {
 			t.Fatalf("label len %d: %v", len(label), err)
 		}
@@ -112,6 +112,9 @@ func TestCreateAdminPeerRollsBackWhenApplyFails(t *testing.T) {
 	if list, _ := f.core.ListAdminPeers(); len(list) != 0 {
 		t.Fatalf("half-created peer left: %+v", list)
 	}
+	if len(dev.Last().Peers) != 0 {
+		t.Fatalf("device kept the rolled-back peer: %+v", dev.Last().Peers)
+	}
 	dev.fail = false
 	p, err := f.core.CreateAdminPeer("laptop")
 	if err != nil || p.Address.String() != "10.99.128.1" {
@@ -131,5 +134,62 @@ func TestAdminPeerViewHasNoPrivateKey(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(string(raw)), "private") || strings.Contains(string(raw), row[0].PrivateKey) {
 		t.Fatalf("view leaks key material: %s", raw)
+	}
+}
+
+func TestCreateAdminPeerCountsLabelInCharacters(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.core.CreateAdminPeer(strings.Repeat("é", 64)); err != nil {
+		t.Fatalf("64 characters rejected: %v", err)
+	}
+}
+
+func TestDeleteAdminPeerRetryRevokesAfterFailedApply(t *testing.T) {
+	f := newFixture(t)
+	p, _ := f.core.CreateAdminPeer("laptop")
+	dev := &failingDevice{Memory: f.dev, fail: true}
+	f.core.dev = dev
+	if err := f.core.DeleteAdminPeer(p.ID); err == nil {
+		t.Fatal("want apply error")
+	}
+	if _, ok := peerByKey(f.dev.Last(), p.PublicKey); !ok {
+		t.Fatal("peer should still be on the device after the failed apply")
+	}
+	dev.fail = false
+	if err := f.core.DeleteAdminPeer(p.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, ok := peerByKey(f.dev.Last(), p.PublicKey); ok {
+		t.Fatal("retry left the revoked peer on the device")
+	}
+}
+
+func TestCreateAdminPeerRetriesOnAddressConflict(t *testing.T) {
+	f := newFixture(t)
+	raced := false
+	f.core.afterAdminTaken = func() {
+		if raced {
+			return
+		}
+		raced = true
+		_, _ = f.st.CreateAdminPeer(store.AdminPeer{Label: "rival", Address: netip.MustParseAddr("10.99.128.1"),
+			PublicKey: "rivalpk", PrivateKey: "x"})
+	}
+	p, err := f.core.CreateAdminPeer("laptop")
+	if err != nil || p.Address.String() != "10.99.128.2" {
+		t.Fatalf("got %+v %v", p, err)
+	}
+}
+
+func TestCreateAdminPeerGivesUpAfterSecondConflict(t *testing.T) {
+	f := newFixture(t)
+	next := 1
+	f.core.afterAdminTaken = func() {
+		addr := netip.AddrFrom4([4]byte{10, 99, 128, byte(next)})
+		next++
+		_, _ = f.st.CreateAdminPeer(store.AdminPeer{Label: "rival", Address: addr, PublicKey: "r", PrivateKey: "x"})
+	}
+	if _, err := f.core.CreateAdminPeer("laptop"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("want ErrConflict, got %v", err)
 	}
 }
