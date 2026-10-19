@@ -131,47 +131,6 @@ func (c *Core) validateHubIDs(ids []string) ([]store.Hub, error) {
 	return hubs, nil
 }
 
-// pushPeer registers the router on a hub and records the outcome. A failure is
-// not returned: the row stays pending and SyncPending retries it. The router
-// and its link are re-read first because callers work from snapshots: pushing
-// for a router deleted or unassigned since would re-register a revoked peer.
-func (c *Core) pushPeer(ctx context.Context, rt store.Router, h store.Hub) {
-	if !c.stillPending(rt.ID, h.ID) {
-		return
-	}
-	if err := c.hubs.UpsertPeer(ctx, h, rt.PublicKey, rt.Address); err != nil {
-		slog.Warn("router peer not registered, left pending", "router", rt.ID, "hub", h.ID, "err", err)
-		return
-	}
-	err := c.st.UpdateRouterHubSyncState(rt.ID, h.ID, store.SyncStateSynced)
-	if errors.Is(err, store.ErrNotFound) {
-		// Revoked while the push was in flight.
-		if derr := c.hubs.DeletePeer(ctx, h, rt.PublicKey); derr != nil {
-			slog.Warn("revoked router peer not undone", "router", rt.ID, "hub", h.ID, "err", derr)
-		}
-		return
-	}
-	if err != nil {
-		slog.Warn("router sync state not recorded", "router", rt.ID, "hub", h.ID, "err", err)
-	}
-}
-
-func (c *Core) stillPending(routerID, hubID string) bool {
-	if _, err := c.st.GetRouter(routerID); err != nil {
-		return false
-	}
-	links, err := c.st.ListRouterHubs(routerID)
-	if err != nil {
-		return false
-	}
-	for _, l := range links {
-		if l.HubID == hubID {
-			return l.SyncState == store.SyncStatePending
-		}
-	}
-	return false
-}
-
 // SetRouterHubs replaces the router's ordered hub list.
 func (c *Core) SetRouterHubs(ctx context.Context, id string, hubIDs []string) error {
 	rt, err := c.st.GetRouter(id)
