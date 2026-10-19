@@ -59,3 +59,20 @@ func TestHubImageMustBePinned(t *testing.T) {
 		}
 	}
 }
+
+func TestReadBundleFromArgvOrStdin(t *testing.T) {
+	got, err := readBundle("abc", strings.NewReader("ignored"))
+	if err != nil || got != "abc" {
+		t.Fatalf("argv form: %q %v", got, err)
+	}
+	got, err = readBundle("-", strings.NewReader("xyz\n"))
+	if err != nil || got != "xyz" {
+		t.Fatalf("stdin form: %q %v", got, err)
+	}
+}
+
+func TestHubImageRejectsOddCharacters(t *testing.T) {
+	if err := checkPinnedImage("ghcr.io/x/img:tag 1; rm"); err == nil {
+		t.Fatal("accepted a reference with spaces")
+	}
+}

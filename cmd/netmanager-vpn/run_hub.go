@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/firewall"
@@ -18,6 +20,7 @@ import (
 )
 
 const (
+	maxBundleBytes    = 16 << 10
 	reconcileRetry    = 10 * time.Second
 	reconcileInterval = time.Minute
 )
@@ -34,9 +37,27 @@ func newHub(cfg config) (*hub.Service, *store.Store, error) {
 	return hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, hub.Options{}), st, nil
 }
 
+// readBundle returns arg, or the bundle read from stdin when arg is "-": an
+// argv element is visible in ps and docker inspect, and the bundle holds the
+// hub's private key.
+func readBundle(arg string, stdin io.Reader) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(stdin, maxBundleBytes))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
 // joinHub is the one-shot install step: store the bundle, bring the
 // interfaces up, exit.
-func joinHub(encoded string) error {
+func joinHub(arg string, stdin io.Reader) error {
+	encoded, err := readBundle(arg, stdin)
+	if err != nil {
+		return err
+	}
 	cfg, err := loadConfig("hub", os.Getenv)
 	if err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 
@@ -222,9 +223,14 @@ func affected(res sql.Result, err error) error {
 
 // BackupTo writes a consistent copy of the database to path. VACUUM INTO is
 // used instead of copying the file because the live database is in WAL mode,
-// where a plain copy can miss pages still in the -wal file. path must not exist.
+// where a plain copy can miss pages still in the -wal file. path must not
+// exist; a failed attempt leaves no partial file behind.
 func (s *Store) BackupTo(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("store: backup: %s already exists", path)
+	}
 	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
+		os.Remove(path)
 		return fmt.Errorf("store: backup: %w", err)
 	}
 	return nil

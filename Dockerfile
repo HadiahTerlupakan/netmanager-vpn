@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS build
+FROM golang:1.26-alpine3.22 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -7,7 +7,7 @@ COPY . .
 # without matching libc versions.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/netmanager-vpn ./cmd/netmanager-vpn
 
-FROM alpine:3.20
+FROM alpine:3.22
 RUN apk add --no-cache nftables ca-certificates
 COPY --from=build /out/netmanager-vpn /usr/local/bin/netmanager-vpn
 # Runs as root on purpose: it creates WireGuard links and loads nftables rules

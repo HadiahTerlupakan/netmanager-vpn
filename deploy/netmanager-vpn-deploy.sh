@@ -10,7 +10,10 @@
 # REPO_GITHUB dan REGISTRY masih nilai rencana: repo GitHub dan visibilitas
 # GHCR belum dibuat pemilik. Sesuaikan sebelum skrip ini dipasang di host.
 #
-# Pemakaian: ssh radpro-vpn-deploy <sha-40>
+# Pemakaian:
+#   lewat SSH:  ssh radpro-vpn-deploy <sha-40>
+#   manual di host:  netmanager-vpn-deploy <sha-40> --izinkan-tanpa-cadangan
+#     (bendera itu hanya dihormati bila skrip TIDAK dipanggil lewat forced command)
 
 set -euo pipefail
 
@@ -19,7 +22,11 @@ CABANG_PRODUKSI="main"
 NAMESPACE="netmanager-vpn"
 REGISTRY="ghcr.io/hadiahterlupakan"
 DIR_CADANGAN="/var/backups/netmanager-vpn"
-BERKAS_KUNCI="/tmp/netmanager-vpn-deploy.lock"
+# Direktori kunci milik root lalu diserahkan ke pengguna deploy dengan mode 700:
+# /tmp bisa diisi symlink oleh pengguna lain.
+DIR_KUNCI="/run/lock/netmanager-vpn"
+BERKAS_KUNCI="${DIR_KUNCI}/deploy.lock"
+CADANGAN_TERBARU_MENIT=1500
 BATAS_ROLLOUT="180s"
 K="sudo -n kubectl -n ${NAMESPACE}"
 
@@ -29,15 +36,19 @@ gagal() {
 }
 
 # Lewat forced command hanya token pertama SSH_ORIGINAL_COMMAND yang dipakai.
+IZIN_TANPA_CADANGAN=false
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   read -r SHA _ <<< "${SSH_ORIGINAL_COMMAND}"
 else
   SHA="${1:-}"
+  [ "${2:-}" = "--izinkan-tanpa-cadangan" ] && IZIN_TANPA_CADANGAN=true
 fi
 [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]] || gagal "Masukan harus SHA commit 40 karakter heksadesimal"
 
 # Satu deploy dalam satu waktu; deploy kedua menunggu giliran.
-exec 9> "${BERKAS_KUNCI}"
+sudo -n install -d -o "$(id -u)" -m 700 "${DIR_KUNCI}"
+[ ! -L "${BERKAS_KUNCI}" ] || gagal "${BERKAS_KUNCI} adalah symlink; deploy ditolak"
+exec 9>> "${BERKAS_KUNCI}"
 echo "Menunggu giliran deploy..."
 flock 9
 
@@ -72,14 +83,42 @@ if grep -qF '{{' "${KERJA}/core.rendered.yaml"; then
   gagal "Render manifes menyisakan placeholder"
 fi
 
-# Cadangan sebelum rollout lewat image yang sedang berjalan, supaya skema lama
-# yang masih dipakai core terbaca apa adanya. Image baru yang belum selesai
-# dibangun baru ketahuan di rollout status. Deploy pertama belum punya
-# Deployment dan dilewati.
+# Preflight sebelum apply: strategi Recreate mematikan core lama lebih dulu,
+# jadi semua yang bisa diperiksa harus diperiksa di sini.
+for rahasia in netmanager-vpn-secrets netmanager-vpn-registry; do
+  ${K} get secret "${rahasia}" > /dev/null 2>&1 \
+    || gagal "Secret ${rahasia} belum ada di namespace ${NAMESPACE}"
+done
+
+# Image dicek dengan kredensial pull cluster sendiri, sehingga yang lolos di
+# sini pasti bisa ditarik kubelet.
+KREDENSIAL_PULL="$(${K} get secret netmanager-vpn-registry -o jsonpath='{.data.\.dockerconfigjson}' \
+  | base64 -d | jq -r '.auths | to_entries[0].value | .username + ":" + .password')"
+REPO_IMAGE="${REGISTRY#ghcr.io/}/netmanager-vpn"
+TOKEN_REGISTRY="$(curl -fsS -u "${KREDENSIAL_PULL}" "https://ghcr.io/token?scope=repository:${REPO_IMAGE}:pull" | jq -r .token)" \
+  || gagal "Token registry tidak didapat; kredensial netmanager-vpn-registry salah?"
+curl -fsS -o /dev/null \
+  -H "Authorization: Bearer ${TOKEN_REGISTRY}" \
+  -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+  "https://ghcr.io/v2/${REPO_IMAGE}/manifests/${TAG}" \
+  || gagal "Image netmanager-vpn:${TAG} tidak ada di registry; build belum selesai?"
+echo "Image tersedia."
+
+# Cadangan lewat core yang sedang berjalan. Core yang crash-loop tidak bisa
+# di-exec, padahal deploy perbaikannya justru yang dibutuhkan; maka salinan
+# harian yang masih segar (CronJob) dianggap cukup.
 if ${K} get deploy/netmanager-vpn > /dev/null 2>&1; then
   echo "Cadangan state sebelum rollout"
-  ${K} exec deploy/netmanager-vpn -- netmanager-vpn backup "${DIR_CADANGAN}" \
-    || gagal "Cadangan gagal; deploy dibatalkan"
+  if ! ${K} exec deploy/netmanager-vpn -- netmanager-vpn backup "${DIR_CADANGAN}"; then
+    SEGAR="$(sudo -n find "${DIR_CADANGAN}" -maxdepth 1 -name 'state-*.db' -mmin "-${CADANGAN_TERBARU_MENIT}" 2> /dev/null || true)"
+    if [ -n "${SEGAR}" ]; then
+      echo "Exec gagal; memakai cadangan harian yang berumur < 25 jam"
+    elif [ "${IZIN_TANPA_CADANGAN}" = "true" ]; then
+      echo "PERINGATAN: lanjut tanpa cadangan (--izinkan-tanpa-cadangan)"
+    else
+      gagal "Cadangan gagal dan tidak ada salinan < 25 jam di ${DIR_CADANGAN}; deploy dibatalkan"
+    fi
+  fi
 fi
 
 ${K} apply -f "${KERJA}/core.rendered.yaml"

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -501,5 +502,19 @@ func TestBackupToCopiesStateAndRefusesOverwrite(t *testing.T) {
 	}
 	if err := s.BackupTo(dst); err == nil {
 		t.Fatal("second backup overwrote the first")
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("refused backup removed the existing file: %v", err)
+	}
+}
+
+func TestBackupToFailureLeavesNoPartialFile(t *testing.T) {
+	s := openTemp(t)
+	dst := filepath.Join(t.TempDir(), "missing-dir", "backup.db")
+	if err := s.BackupTo(dst); err == nil {
+		t.Fatal("backup into a missing directory succeeded")
+	}
+	if _, err := os.Stat(dst); err == nil {
+		t.Fatal("partial file left behind")
 	}
 }

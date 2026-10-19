@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -68,9 +69,14 @@ func loadConfig(mode string, getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
+var imageRefChars = regexp.MustCompile(`^[A-Za-z0-9./:_@-]+$`)
+
 // checkPinnedImage rejects references a hub could not reproduce later: no
 // tag or digest, or the moving :latest.
 func checkPinnedImage(ref string) error {
+	if !imageRefChars.MatchString(ref) {
+		return fmt.Errorf("%q has characters outside an image reference", ref)
+	}
 	if strings.Contains(ref, "@sha256:") {
 		return nil
 	}
@@ -94,13 +100,13 @@ func main() {
 	var err error
 	switch {
 	case len(args) == 3 && args[0] == "hub" && args[1] == "join":
-		err = joinHub(args[2])
+		err = joinHub(args[2], os.Stdin)
 	case len(args) == 2 && args[0] == "backup":
 		err = backup(args[1], time.Now())
 	case len(args) == 0 && *mode != "":
 		err = serve(*mode)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: netmanager-vpn -mode core|hub | netmanager-vpn hub join <bundle> | netmanager-vpn backup <dir>")
+		fmt.Fprintln(os.Stderr, "usage: netmanager-vpn -mode core|hub | netmanager-vpn hub join <bundle|-> | netmanager-vpn backup <dir>")
 		os.Exit(2)
 	}
 	if err != nil {
