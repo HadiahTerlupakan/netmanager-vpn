@@ -192,7 +192,7 @@ func TestClaimRouterAndEvents(t *testing.T) {
 	a := newHub(t, s, "a", "10.99.0.2")
 	b := newHub(t, s, "b", "10.99.0.3")
 	r := newRouter(t, s, "r1", "10.100.0.1")
-	if err := s.ClaimRouter(r.ID); err != nil {
+	if err := s.ClaimRouter(r.ID, "dev-1"); err != nil {
 		t.Fatal(err)
 	}
 	got := must(s.GetRouter(r.ID))
@@ -404,17 +404,17 @@ func TestSetRouterHubsRejectsOrphans(t *testing.T) {
 func TestClaimRouterOnlyWhenPending(t *testing.T) {
 	s := openTemp(t)
 	r := newRouter(t, s, "r1", "10.100.0.1")
-	if err := s.ClaimRouter(r.ID); err != nil {
+	if err := s.ClaimRouter(r.ID, "dev-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimRouter(r.ID); !errors.Is(err, ErrNotFound) {
+	if err := s.ClaimRouter(r.ID, "dev-1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second claim = %v", err)
 	}
 	gone := newRouter(t, s, "r2", "10.100.0.2")
 	if err := s.DeleteRouter(gone.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimRouter(gone.ID); !errors.Is(err, ErrNotFound) {
+	if err := s.ClaimRouter(gone.ID, "dev-1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("claim released = %v", err)
 	}
 }

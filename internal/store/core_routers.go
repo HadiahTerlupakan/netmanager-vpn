@@ -70,12 +70,13 @@ func (s *Store) ListRouters() ([]Router, error) {
 	return out, rows.Err()
 }
 
-// ClaimRouter marks a pending router as claimed by its device; any other
-// router (already active, released, unknown) yields ErrNotFound.
-func (s *Store) ClaimRouter(id string) error {
+// ClaimRouter marks a pending router as claimed by its device and records the
+// device's ref; any other router (already active, released, unknown) yields
+// ErrNotFound.
+func (s *Store) ClaimRouter(id, ref string) error {
 	return affected(s.db.Exec(
-		`UPDATE routers SET status = ? WHERE id = ? AND status = ? AND released_at IS NULL`,
-		RouterStatusActive, id, RouterStatusPending))
+		`UPDATE routers SET status = ?, ref = ? WHERE id = ? AND status = ? AND released_at IS NULL`,
+		RouterStatusActive, ref, id, RouterStatusPending))
 }
 
 // DeleteRouter soft-deletes a router: the row stays with released_at set so its

@@ -44,9 +44,11 @@ type Core struct {
 
 	// mu guards active; applyMu serializes writes to the device so two
 	// mutations cannot interleave a stale config over a fresh one.
-	mu      sync.Mutex
-	active  map[string]string // router ID -> hub ID currently carrying it
-	applyMu sync.Mutex
+	mu     sync.Mutex
+	active map[string]string // router ID -> hub ID currently carrying it
+	// handshakes holds the newest router handshake seen on its active hub.
+	handshakes map[string]time.Time
+	applyMu    sync.Mutex
 	// regMu serializes registry rewrites (status refresh, join reissue) so a
 	// stale snapshot cannot overwrite a freshly reissued hub.
 	regMu sync.Mutex
@@ -57,7 +59,7 @@ func New(dev wgdevice.Device, st *store.Store, box *secret.Box, hubs HubClient, 
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}}
+	return &Core{dev: dev, st: st, box: box, hubs: hubs, cfg: cfg, active: map[string]string{}, handshakes: map[string]time.Time{}}
 }
 
 // Init makes sure wg-core has a key and applies its configuration.
