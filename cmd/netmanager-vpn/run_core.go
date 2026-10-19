@@ -50,9 +50,15 @@ func runCore(ctx context.Context, cfg config) error {
 			slog.Info("expired unclaimed routers", "count", n)
 		}
 	})
+	// The firewall is re-applied with the sync: k3s and Docker rewrite their
+	// own rules at runtime, and a flushed table must not stay open until the
+	// next restart.
 	go every(ctx, syncInterval, func() {
 		if err := c.SyncPending(ctx); err != nil {
 			slog.Error("sync pending peers failed", "err", err)
+		}
+		if err := firewall.ApplyCore(fw, ipt); err != nil {
+			slog.Error("core firewall re-apply failed", "err", err)
 		}
 	})
 	slog.Info("core listening", "port", apiPort)
