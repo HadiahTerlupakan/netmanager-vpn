@@ -6,4 +6,12 @@ table inet netmanager_vpn {
 		tcp dport 7480 ip saddr { 127.0.0.1, 10.42.0.0/16 } accept
 		tcp dport 7480 drop
 	}
+	chain wgcore_in {
+		type filter hook prerouting priority -150; policy accept;
+		iifname "wg-core" ct state established,related accept
+		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "wg-core" ip saddr 10.99.128.0/24 ip daddr 10.100.0.0/14 accept
+		iifname "wg-core" drop
+	}
 }

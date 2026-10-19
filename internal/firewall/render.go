@@ -15,9 +15,10 @@ table inet netmanager_vpn {
 `
 
 // Chains use policy accept because they share hooks with other software's
-// tables; we only drop what we own. No rule tracks connections: the hub keeps
-// no state, so replies are matched by port. A bare SYN from wg-nm is dropped
-// first because the source port alone would let a router open connections.
+// tables; we only drop what we own. No hub rule tracks connections: the hub
+// keeps no state, so replies are matched by port. A bare SYN from wg-nm is
+// dropped first because the source port alone would let a router open
+// connections.
 const (
 	hubForward = `	chain forward {
 		type filter hook forward priority 0; policy accept;
@@ -44,6 +45,19 @@ const (
 		tcp dport 7480 drop
 	}
 `
+	// wgcore_in runs before kube-proxy's NodePort DNAT (priority -100) so a
+	// hub cannot reach a NodePort, kubelet or the k3s API on 10.99.0.1, or the
+	// pod network. Conntrack (-200) has already run, and unlike a hub the core
+	// sees both directions of every flow, so replies are matched by state.
+	coreWgIn = `	chain wgcore_in {
+		type filter hook prerouting priority -150; policy accept;
+		iifname "wg-core" ct state established,related accept
+		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "wg-core" ip saddr 10.99.128.0/24 ip daddr 10.100.0.0/14 accept
+		iifname "wg-core" drop
+	}
+`
 	postamble = "}\n"
 )
 
@@ -54,7 +68,8 @@ func RenderHub() string {
 }
 
 // RenderCore returns the core ruleset: the control port answers only the
-// local host and the pod network.
+// local host and the pod network, and wg-core admits only router RADIUS and
+// ping to the core and admin traffic to routers.
 func RenderCore() string {
-	return preamble + coreInput + postamble
+	return preamble + coreInput + coreWgIn + postamble
 }

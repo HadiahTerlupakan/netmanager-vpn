@@ -29,11 +29,33 @@ func TestRenderCoreMatchesGolden(t *testing.T) {
 	}
 }
 
-func TestRulesetsAreStateless(t *testing.T) {
-	for name, rs := range map[string]string{"hub": RenderHub(), "core": RenderCore()} {
-		if strings.Contains(rs, "ct ") {
-			t.Errorf("%s ruleset must not use conntrack", name)
+// The hub may carry only one direction of a flow (the router can answer
+// through another hub), so conntrack there would drop half the replies. The
+// core sees both directions whichever hub carries the router.
+func TestHubRulesetIsStateless(t *testing.T) {
+	if strings.Contains(RenderHub(), "ct ") {
+		t.Error("hub ruleset must not use conntrack")
+	}
+}
+
+// A compromised hub VPS must not reach kubelet, the k3s API, NodePorts or the
+// pod network through wg-core: only RADIUS and ping to the core, and admin
+// traffic to routers, enter there.
+func TestCoreFiltersWgCoreIngressBeforeNodePortDNAT(t *testing.T) {
+	rs := RenderCore()
+	for _, want := range []string{
+		"type filter hook prerouting priority -150; policy accept;",
+		`iifname "wg-core" ct state established,related accept`,
+		`iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept`,
+		`iifname "wg-core" ip saddr 10.99.128.0/24 ip daddr 10.100.0.0/14 accept`,
+	} {
+		if !strings.Contains(rs, want) {
+			t.Errorf("core ruleset lacks %q", want)
 		}
+	}
+	drop := strings.Index(rs, `iifname "wg-core" drop`)
+	if drop < 0 || drop < strings.LastIndex(rs, `iifname "wg-core" ip saddr`) {
+		t.Fatalf("wg-core must end in a drop after its accepts:\n%s", rs)
 	}
 }
 
