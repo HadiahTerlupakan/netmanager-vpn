@@ -142,7 +142,10 @@ const stampSwitch = ":global nmVpnSwitchAt; :set nmVpnSwitchAt [/system resource
 // On a re-paste each of our rules moves directly above the first foreign rule
 // when that rule sits higher. The destination is never one of ours, so the
 // move cannot target itself, and after both lines no foreign rule is above
-// either of ours; an order that is already right is left alone.
+// either of ours; an order that is already right is left alone. Comments are
+// read with :tostr rather than matched with `find where comment!=`, because a
+// where-comparison on an unset comment may be false and operators' policy
+// rules are often comment-less.
 func writeRules(b *strings.Builder) {
 	update := "action=lookup-only-in-table table=" + tableName + " comment=" + str(tag)
 	for _, s := range subnets {
@@ -152,9 +155,9 @@ func writeRules(b *strings.Builder) {
 		fmt.Fprintf(b, "/routing rule set [find %s] %s\n", sel, update)
 	}
 	for _, s := range subnets {
-		fmt.Fprintf(b, "{ :local foreign [/routing rule find where comment!=%s]; "+
-			":if ([:len $foreign] > 0) do={ :local all [/routing rule find]; "+
-			":local f ($foreign->0); :local r ([/routing rule find comment=%s dst-address=%s]->0); "+
+		fmt.Fprintf(b, "{ :local all [/routing rule find]; :local f; :local found false; "+
+			":foreach i in=$all do={ :if (($found = false) && ([:tostr [/routing rule get $i comment]] != %s)) do={ :set f $i; :set found true } }; "+
+			":if ($found) do={ :local r ([/routing rule find comment=%s dst-address=%s]->0); "+
 			":if ([:find $all $f] < [:find $all $r]) do={ /routing rule move $r destination=$f } } }\n",
 			str(tag), str(tag), s)
 	}

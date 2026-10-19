@@ -140,15 +140,18 @@ func TestRenderCreatesRulesAtTheTop(t *testing.T) {
 }
 
 // Each of our rules is moved directly above the first foreign rule when that
-// rule sits higher. The target is never one of ours, so it cannot be a
+// rule sits higher. The first foreign rule is found by reading each rule's
+// comment as a string rather than with `find where comment!=`, because a
+// where-comparison on an unset comment may be false and operators' policy
+// rules are often comment-less. The target is never one of ours, so it cannot be a
 // self-move, and once both have run no foreign rule is above either of ours.
 func TestRenderReordersAboveFirstForeignRule(t *testing.T) {
 	out := RenderFull(testInput())
 	route := strings.Index(out, "/ip route")
 	for _, s := range []string{"10.99.0.0/24", "10.99.128.0/24"} {
-		want := `{ :local foreign [/routing rule find where comment!="netmanager-vpn"]; ` +
-			`:if ([:len $foreign] > 0) do={ :local all [/routing rule find]; ` +
-			`:local f ($foreign->0); :local r ([/routing rule find comment="netmanager-vpn" dst-address=` + s + `]->0); ` +
+		want := `{ :local all [/routing rule find]; :local f; :local found false; ` +
+			`:foreach i in=$all do={ :if (($found = false) && ([:tostr [/routing rule get $i comment]] != "netmanager-vpn")) do={ :set f $i; :set found true } }; ` +
+			`:if ($found) do={ :local r ([/routing rule find comment="netmanager-vpn" dst-address=` + s + `]->0); ` +
 			`:if ([:find $all $f] < [:find $all $r]) do={ /routing rule move $r destination=$f } } }`
 		at := strings.Index(out, want)
 		if at < 0 || at > route {
