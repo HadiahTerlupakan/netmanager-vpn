@@ -4,8 +4,10 @@ import "fmt"
 
 // hubCommand is the line an operator pastes on a hub VPS: arg is the join
 // bundle for an install, or "upgrade" to move an installed hub to HubImage.
+// Many VPS images log in as root and ship no sudo: `$(command -v sudo)` then
+// expands to nothing, and env sets the variable either way.
 func (c *Core) hubCommand(arg string) string {
-	return fmt.Sprintf("curl -fsSL %s | sudo NMVPN_IMAGE=%s sh -s -- %s", c.cfg.InstallURL, c.cfg.HubImage, arg)
+	return fmt.Sprintf("curl -fsSL %s | $(command -v sudo) env NMVPN_IMAGE=%s sh -s -- %s", c.cfg.InstallURL, c.cfg.HubImage, arg)
 }
 
 // UpgradeCommand returns the command that moves an installed hub to the image

@@ -2,8 +2,8 @@
 # Installs or upgrades a netmanager-vpn hub on a rented VPS. Run through the
 # command the VPN tab in netmanager shows, which sets NMVPN_IMAGE and passes
 # either the join bundle or "upgrade" as $1:
-#   curl -fsSL <url> | sudo NMVPN_IMAGE=<image> sh -s -- <bundle>
-#   curl -fsSL <url> | sudo NMVPN_IMAGE=<image> sh -s -- upgrade
+#   curl -fsSL <url> | $(command -v sudo) env NMVPN_IMAGE=<image> sh -s -- <bundle>
+#   curl -fsSL <url> | $(command -v sudo) env NMVPN_IMAGE=<image> sh -s -- upgrade
 set -eu
 
 STATE_DIR=/var/lib/netmanager-vpn

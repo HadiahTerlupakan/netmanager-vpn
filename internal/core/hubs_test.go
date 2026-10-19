@@ -71,7 +71,7 @@ func peerByKey(cfg wgdevice.Config, pub string) (wgdevice.PeerConfig, bool) {
 
 func bundleOf(t *testing.T, cmd string) joinbundle.Bundle {
 	t.Helper()
-	prefix := "curl -fsSL https://example.test/install-hub.sh | sudo NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 sh -s -- "
+	prefix := "curl -fsSL https://example.test/install-hub.sh | $(command -v sudo) env NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 sh -s -- "
 	enc, ok := strings.CutPrefix(cmd, prefix)
 	if !ok {
 		t.Fatalf("unexpected install command %q", cmd)
