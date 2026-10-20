@@ -8,10 +8,12 @@ import (
 )
 
 // RouterScript renders the RouterOS script for a router. part is "full" for
-// the whole setup or "scheduler" for the switch logic alone.
+// the whole setup, "scheduler" for the switch script and its scheduler, or
+// "switch" for the switch script's source alone, which a router takes over
+// /system/script set source= without re-pasting the scheduler.
 func (c *Core) RouterScript(id, part string) (string, error) {
-	if part != "full" && part != "scheduler" {
-		return "", fmt.Errorf("%w: part must be full or scheduler", ErrValidation)
+	if part != "full" && part != "scheduler" && part != "switch" {
+		return "", fmt.Errorf("%w: part must be full, scheduler or switch", ErrValidation)
 	}
 	in, err := c.routerInput(id)
 	if err != nil {
@@ -20,8 +22,11 @@ func (c *Core) RouterScript(id, part string) (string, error) {
 	if err := in.Validate(); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrValidation, err)
 	}
-	if part == "scheduler" {
+	switch part {
+	case "scheduler":
 		return routeros.RenderScheduler(in), nil
+	case "switch":
+		return routeros.SwitchSource(in), nil
 	}
 	return routeros.RenderFull(in), nil
 }
