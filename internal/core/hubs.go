@@ -35,6 +35,7 @@ type HubView struct {
 	Name        string     `json:"name"`
 	PublicHost  string     `json:"publicHost"`
 	ListenPort  int        `json:"listenPort"`
+	PublicKey   string     `json:"publicKey"`
 	Status      string     `json:"status"`
 	RouterCount int        `json:"routerCount"`
 	LastSeenAt  *time.Time `json:"lastSeenAt"`
@@ -135,7 +136,7 @@ func (c *Core) ListHubs() ([]HubView, error) {
 	out := make([]HubView, 0, len(hubs))
 	for _, h := range hubs {
 		out = append(out, HubView{ID: h.ID, Name: h.Name, PublicHost: h.PublicHost,
-			ListenPort: h.ListenPort, Status: h.Status, RouterCount: counts[h.ID], LastSeenAt: h.LastSeenAt})
+			ListenPort: h.ListenPort, PublicKey: h.PublicKey, Status: h.Status, RouterCount: counts[h.ID], LastSeenAt: h.LastSeenAt})
 	}
 	return out, nil
 }

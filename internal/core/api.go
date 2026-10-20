@@ -138,7 +138,7 @@ func (c *Core) createHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := HubView{ID: h.ID, Name: h.Name, PublicHost: h.PublicHost, ListenPort: h.ListenPort,
-		Status: h.Status, LastSeenAt: h.LastSeenAt}
+		PublicKey: h.PublicKey, Status: h.Status, LastSeenAt: h.LastSeenAt}
 	writeJSON(w, http.StatusOK, map[string]any{"hub": view, "installCommand": cmd})
 }
 

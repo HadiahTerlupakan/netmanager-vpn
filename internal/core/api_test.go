@@ -90,7 +90,8 @@ func TestDeleteHubInUseIs409(t *testing.T) {
 }
 
 func TestCreateHubReturnsViewAndCommand(t *testing.T) {
-	h := newFixture(t).core.Handler(testToken)
+	f := newFixture(t)
+	h := f.core.Handler(testToken)
 	rec := call(t, h, "POST", "/v1/hubs", `{"name":"jkt","publicHost":"jkt.example.com","listenPort":0}`, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
@@ -105,6 +106,13 @@ func TestCreateHubReturnsViewAndCommand(t *testing.T) {
 	if out.Hub.Status != store.HubStatusPendingInstall || out.Hub.RouterCount != 0 ||
 		out.Hub.PublicHost != "jkt.example.com" || !strings.HasPrefix(out.InstallCommand, "curl ") {
 		t.Fatalf("%+v", out)
+	}
+	stored, err := f.st.GetHub(out.Hub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hub.PublicKey == "" || out.Hub.PublicKey != stored.PublicKey {
+		t.Fatalf("create publicKey %q, want %q", out.Hub.PublicKey, stored.PublicKey)
 	}
 }
 
