@@ -1,0 +1,153 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netmanager-vpn
+---
+# Secret netmanager-vpn-secrets and the registry pull secret
+# netmanager-vpn-registry are created by hand and never applied from the repo.
+# Secret keys: NMVPN_ENCRYPTION_KEY, NMVPN_API_TOKEN, NMVPN_CORE_ENDPOINT,
+# NMVPN_INSTALL_URL. NMVPN_HUB_IMAGE comes from this manifest so new hubs
+# always get the core's own release.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netmanager-vpn
+  namespace: netmanager-vpn
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  # Two cores would fight over wg-core and UDP 51822 on the same host.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: netmanager-vpn
+  template:
+    metadata:
+      labels:
+        app: netmanager-vpn
+    spec:
+      imagePullSecrets:
+        - name: netmanager-vpn-registry
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: core
+          image: "{{VPN_IMAGE}}"
+          imagePullPolicy: IfNotPresent
+          args: ["-mode", "core"]
+          envFrom:
+            - secretRef:
+                name: netmanager-vpn-secrets
+          env:
+            - name: NMVPN_HUB_IMAGE
+              value: "{{VPN_IMAGE}}"
+          ports:
+            - containerPort: 7480
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          # Probes target loopback: with hostNetwork the kubelet would
+          # otherwise hit the node IP, which the core's nft input rule drops
+          # (7480 accepts only 127.0.0.1 and 10.42.0.0/16).
+          startupProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 7480
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 7480
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 7480
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/netmanager-vpn
+            - name: backups
+              mountPath: /var/backups/netmanager-vpn
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/lib/netmanager-vpn
+            type: DirectoryOrCreate
+        - name: backups
+          hostPath:
+            path: /var/backups/netmanager-vpn
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netmanager-vpn
+  namespace: netmanager-vpn
+spec:
+  type: ClusterIP
+  selector:
+    app: netmanager-vpn
+  ports:
+    - port: 7480
+      targetPort: 7480
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: netmanager-vpn-backup
+  namespace: netmanager-vpn
+spec:
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: netmanager-vpn-registry
+          containers:
+            - name: backup
+              image: "{{VPN_IMAGE}}"
+              imagePullPolicy: IfNotPresent
+              args: ["backup", "/var/backups/netmanager-vpn"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: state
+                  mountPath: /var/lib/netmanager-vpn
+                - name: backups
+                  mountPath: /var/backups/netmanager-vpn
+          volumes:
+            - name: state
+              hostPath:
+                path: /var/lib/netmanager-vpn
+                type: Directory
+            - name: backups
+              hostPath:
+                path: /var/backups/netmanager-vpn
+                type: DirectoryOrCreate
