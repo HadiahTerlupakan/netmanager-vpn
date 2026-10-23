@@ -231,6 +231,23 @@ func TestSwitchNeedsTwoFailedChecks(t *testing.T) {
 	}
 }
 
+// On RouterOS 7.24.5 a scheduler run without the policy policy gets a fresh,
+// private set of globals each time: nmVpnFailCount never reached 2 and the
+// router never switched, and nmVpnSwitchAt set at paste time was invisible.
+func TestSwitchScriptAndSchedulerKeepGlobalsAcrossRuns(t *testing.T) {
+	out := RenderScheduler(testInput())
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.Contains(line, " add name=netmanager-vpn-switch ") {
+			continue
+		}
+		start := strings.Index(line, " policy=") + len(" policy=")
+		policies := strings.Split(line[start:start+strings.Index(line[start:], " ")], ",")
+		if !slices.Contains(policies, "policy") {
+			t.Errorf("policy %v lacks \"policy\": %s", policies, line[:start+30])
+		}
+	}
+}
+
 func TestSwitchUsesUptime(t *testing.T) {
 	src := SwitchSource(testInput())
 	if strings.Contains(src, ":timestamp") || !strings.Contains(src, ":local now [/system resource get uptime]") {

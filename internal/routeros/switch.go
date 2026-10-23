@@ -17,8 +17,10 @@ const (
 	// every router through its hubs (Ruling R13).
 	failsToSwitch = 2
 	// The switch script needs test for ping and write for the peer; the
-	// scheduler must hold at least the script's policy to run it.
-	policy = "read,write,test"
+	// scheduler must hold at least the script's policy to run it. Without
+	// policy, RouterOS (seen on 7.24.5) gives each scheduler run its own
+	// empty globals, so the fail count and fail times never carry over.
+	policy = "read,write,policy,test"
 )
 
 // RenderScheduler returns the switch script and the scheduler that runs it.
