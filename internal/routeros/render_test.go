@@ -224,7 +224,7 @@ func TestSwitchNeedsTwoFailedChecks(t *testing.T) {
 	src := SwitchSource(testInput())
 	count := strings.Index(src, ">= 4) do={ :set nmVpnFailCount 0 } else={ :set nmVpnFailCount ($nmVpnFailCount + 1) }")
 	gate := strings.Index(src, ":if ($nmVpnFailCount >= 2) do={\n    :set nmVpnFailCount 0")
-	mark := strings.Index(src, ":set ($nmVpnFail->$curHost) $now")
+	mark := strings.Index(src, ":set ($nmVpnFail->$curEp) $now")
 	set := strings.Index(src, "peers set $id")
 	if count < 0 || gate < 0 || !(count < gate && gate < mark && mark < set) {
 		t.Errorf("count=%d gate=%d mark=%d set=%d", count, gate, mark, set)
@@ -244,6 +244,26 @@ func TestSwitchScriptAndSchedulerKeepGlobalsAcrossRuns(t *testing.T) {
 		policies := strings.Split(line[start:start+strings.Index(line[start:], " ")], ",")
 		if !slices.Contains(policies, "policy") {
 			t.Errorf("policy %v lacks \"policy\": %s", policies, line[:start+30])
+		}
+	}
+}
+
+// Two hubs on one VPS share a host. Keyed by host, marking the dead one marked
+// both, "all marked, take the first" picked the dead hub again, and the lab
+// router on 7.24.5 never left it.
+func TestSwitchMarksHubsByHostAndPort(t *testing.T) {
+	in := testInput()
+	in.Servers[1].Host = in.Servers[0].Host
+	in.Servers[1].Port = 51823
+	src := SwitchSource(in)
+	for _, want := range []string{
+		`:local curEp [:pick $cur 0 [:find $cur "|" [:find $cur "|"]]]`,
+		`:set ($nmVpnFail->$curEp) $now`,
+		`:local ep [:pick $s 0 [:find $s "|" [:find $s "|"]]]`,
+		`:local t ($nmVpnFail->$ep)`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("switch does not key marks by host|port, missing %s", want)
 		}
 	}
 }

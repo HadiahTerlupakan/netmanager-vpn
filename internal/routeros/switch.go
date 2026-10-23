@@ -47,7 +47,9 @@ func RenderScheduler(in Input) string {
 // Marks and the grace are tested apart from the subtraction because RouterOS
 // does not short-circuit, and subtracting a missing value is an error. The
 // current hub is the full host|port|key entry, so a hub that changed its key
-// or port is not mistaken for the listed one; marks stay keyed by host.
+// or port is not mistaken for the listed one. Marks are keyed by host|port:
+// two hubs on one VPS share a host, and a host-only mark on the dead one would
+// mark both and send the router back to the dead hub.
 const switchBody = `:global nmVpnFail
 :global nmVpnFailCount
 :global nmVpnSwitchAt
@@ -63,16 +65,16 @@ const switchBody = `:global nmVpnFail
     :set nmVpnFailCount 0
     :local id ([/interface wireguard peers find interface=@IFACE@]->0)
     :local cur ([:tostr [/interface wireguard peers get $id endpoint-address]] . "|" . [/interface wireguard peers get $id endpoint-port] . "|" . [/interface wireguard peers get $id public-key])
-    :local curHost [:pick $cur 0 [:find $cur "|"]]
-    :set ($nmVpnFail->$curHost) $now
+    :local curEp [:pick $cur 0 [:find $cur "|" [:find $cur "|"]]]
+    :set ($nmVpnFail->$curEp) $now
     :local n [:len $servers]
     :local idx [:find $servers $cur]
     :if ([:typeof $idx] != "num") do={ :set idx -1 }
     :local next ""
     :for k from=1 to=$n do={
       :local s [:pick $servers (($idx + $k) % $n)]
-      :local h [:pick $s 0 [:find $s "|"]]
-      :local t ($nmVpnFail->$h)
+      :local ep [:pick $s 0 [:find $s "|" [:find $s "|"]]]
+      :local t ($nmVpnFail->$ep)
       :local fresh false
       :if ([:typeof $t] = "time") do={ :set fresh (($now - $t) < @HOLD@) }
       :if (($next = "") && ($fresh = false)) do={ :set next $s }
