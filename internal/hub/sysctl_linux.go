@@ -2,11 +2,8 @@
 
 package hub
 
-import (
-	"os"
-	"strings"
-)
+import "strings"
 
 func writeSysctl(key, value string) error {
-	return os.WriteFile("/proc/sys/"+strings.ReplaceAll(key, ".", "/"), []byte(value), 0o644)
+	return ensureProcValue("/proc/sys/"+strings.ReplaceAll(key, ".", "/"), value)
 }

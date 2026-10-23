@@ -275,6 +275,13 @@ func TestDeleteHubInUse(t *testing.T) {
 	if err != nil || len(views) != 1 || views[0].RouterCount != 1 {
 		t.Fatalf("views %+v err %v", views, err)
 	}
+	stored, err := f.st.GetHub(hub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if views[0].PublicKey == "" || views[0].PublicKey != stored.PublicKey {
+		t.Fatalf("list publicKey %q, want %q", views[0].PublicKey, stored.PublicKey)
+	}
 
 	if err := f.st.SetRouterHubs(r.ID, nil); err != nil {
 		t.Fatal(err)

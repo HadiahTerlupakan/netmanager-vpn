@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 )
 
@@ -89,7 +90,8 @@ func TestDeleteHubInUseIs409(t *testing.T) {
 }
 
 func TestCreateHubReturnsViewAndCommand(t *testing.T) {
-	h := newFixture(t).core.Handler(testToken)
+	f := newFixture(t)
+	h := f.core.Handler(testToken)
 	rec := call(t, h, "POST", "/v1/hubs", `{"name":"jkt","publicHost":"jkt.example.com","listenPort":0}`, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
@@ -104,6 +106,13 @@ func TestCreateHubReturnsViewAndCommand(t *testing.T) {
 	if out.Hub.Status != store.HubStatusPendingInstall || out.Hub.RouterCount != 0 ||
 		out.Hub.PublicHost != "jkt.example.com" || !strings.HasPrefix(out.InstallCommand, "curl ") {
 		t.Fatalf("%+v", out)
+	}
+	stored, err := f.st.GetHub(out.Hub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hub.PublicKey == "" || out.Hub.PublicKey != stored.PublicKey {
+		t.Fatalf("create publicKey %q, want %q", out.Hub.PublicKey, stored.PublicKey)
 	}
 }
 
@@ -234,6 +243,28 @@ func TestRouterScriptUnknownPart(t *testing.T) {
 	}
 	if _, err := f.core.RouterScript("nope", "full"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown router: %v", err)
+	}
+}
+
+func TestRouterScriptSwitchPart(t *testing.T) {
+	f, _, hubs := routerFixture(t, 2)
+	rv, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID, hubs[1].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := f.core.routerInput(rv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := f.core.RouterScript(rv.ID, "switch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := routeros.SwitchSource(in); s != want {
+		t.Fatalf("switch part differs from SwitchSource:\n%s", s)
+	}
+	if strings.Contains(s, "/system scheduler") {
+		t.Fatalf("switch part must not carry the scheduler:\n%s", s)
 	}
 }
 
