@@ -122,7 +122,7 @@ func activeFixture(t *testing.T, listed ...int) activeEnv {
 	for _, i := range listed {
 		ids = append(ids, hubs[i].ID)
 	}
-	view, err := f.core.CreateRouter(context.Background(), "r1", ids)
+	view, err := f.core.CreateRouter(context.Background(), "r1", ids, "")
 	if err != nil {
 		t.Fatal(err)
 	}

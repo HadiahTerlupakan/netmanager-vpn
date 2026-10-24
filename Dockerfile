@@ -9,8 +9,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/netmanager-vpn ./c
 
 FROM alpine:3.22
 # iptables only reaches Docker's DOCKER-USER chain on hosts that run Docker;
-# our own rules stay in nftables.
-RUN apk add --no-cache nftables iptables ca-certificates
+# our own rules stay in nftables. strongSwan and accel-ppp carry L2TP/IPsec;
+# the hub starts them only when the host exposes /dev/ppp and l2tp_ppp.
+RUN apk add --no-cache nftables iptables ca-certificates strongswan accel-ppp
 COPY --from=build /out/netmanager-vpn /usr/local/bin/netmanager-vpn
 # Runs as root on purpose: it creates WireGuard links and loads nftables rules
 # in the host network namespace (hostNetwork / --network host), which needs

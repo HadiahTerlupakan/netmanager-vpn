@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
 )
 
 func apiEnv(t *testing.T) (*env, http.Handler) {
@@ -140,5 +142,150 @@ func TestAPISlashAndPlusKey(t *testing.T) {
 	}
 	if rec := do(h, "GET", "/v1/peers", "", "tok"); strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("not deleted: %s", rec.Body)
+	}
+}
+
+func TestPutPeerWithoutProtocolIsWireGuard(t *testing.T) {
+	e, h := apiEnv(t)
+	if rec := do(h, "PUT", peerPath(), `{"address":"10.100.0.10"}`, "tok"); rec.Code != http.StatusNoContent {
+		t.Fatalf("code %d %s", rec.Code, rec.Body)
+	}
+	peers, err := e.st.ListPeers()
+	if err != nil || len(peers) != 1 || peers[0].Protocol != "wireguard" || peers[0].PPPUser != "" {
+		t.Fatalf("peers %+v err %v", peers, err)
+	}
+}
+
+func TestPutPeerStoresSealedPPPPassword(t *testing.T) {
+	e, h := apiEnv(t)
+	body := `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-0a","pppPassword":"` + testPPPPass + `"}`
+	if rec := do(h, "PUT", peerPath(), body, "tok"); rec.Code != http.StatusNoContent {
+		t.Fatalf("code %d %s", rec.Code, rec.Body)
+	}
+	peers, err := e.st.ListPeers()
+	if err != nil || len(peers) != 1 || peers[0].Protocol != "l2tp" || peers[0].PPPUser != "nmvpn-0a" {
+		t.Fatalf("peers %+v err %v", peers, err)
+	}
+	if peers[0].PPPPassword == testPPPPass || peers[0].PPPPassword == "" {
+		t.Fatal("password not sealed")
+	}
+	if rec := do(h, "GET", "/v1/peers", "", "tok"); strings.Contains(rec.Body.String(), testPPPPass) {
+		t.Fatalf("listing leaks the password: %s", rec.Body)
+	}
+}
+
+func TestPutPeerRejectsBadPPPFields(t *testing.T) {
+	_, h := apiEnv(t)
+	ok := testPPPPass
+	for name, body := range map[string]string{
+		"wireguard with user":     `{"address":"10.100.0.10","pppUsername":"nmvpn-0a"}`,
+		"wireguard with password": `{"address":"10.100.0.10","protocol":"wireguard","pppPassword":"` + ok + `"}`,
+		"unknown protocol":        `{"address":"10.100.0.10","protocol":"sstp"}`,
+		"l2tp without user":       `{"address":"10.100.0.10","protocol":"l2tp","pppPassword":"` + ok + `"}`,
+		"l2tp bad user":           `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-XY","pppPassword":"` + ok + `"}`,
+		"l2tp user too long":      `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-` + strings.Repeat("a", 65) + `","pppPassword":"` + ok + `"}`,
+		"l2tp short password":     `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-0a","pppPassword":"short"}`,
+		"l2tp quote in password":  `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-0a","pppPassword":"` + ok + `\""}`,
+		"l2tp password too long":  `{"address":"10.100.0.10","protocol":"l2tp","pppUsername":"nmvpn-0a","pppPassword":"` + strings.Repeat("a", 65) + `"}`,
+	} {
+		if rec := do(h, "PUT", peerPath(), body, "tok"); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: code %d", name, rec.Code)
+		}
+	}
+}
+
+func protocolsOf(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := do(h, "GET", "/v1/info", "", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("info code %d", rec.Code)
+	}
+	var body struct {
+		Protocols []string `json:"protocols"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(body.Protocols, ",")
+}
+
+func TestInfoReportsL2TPOnlyWhenReady(t *testing.T) {
+	cases := map[string]struct {
+		ppp     bool // host has /dev/ppp and l2tp_ppp, so the daemons are wired
+		psk     bool
+		running bool
+		want    string
+	}{
+		"no ppp on host":      {false, false, false, "wireguard"},
+		"no psk":              {true, false, true, "wireguard"},
+		"daemons not running": {true, true, false, "wireguard"},
+		"everything in place": {true, true, true, "wireguard,l2tp"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			var p *pppEnv
+			if c.ppp {
+				p = &pppEnv{sessions: ppp.NewMemorySessions(), rt: &fakePPP{running: c.running}}
+			}
+			e := newEnvWith(t, p)
+			if err := e.svc.Join(e.bundle()); err != nil {
+				t.Fatal(err)
+			}
+			h := e.svc.Handler("tok")
+			if c.psk {
+				body := `{"psk":"` + testPSK + `","localId":"31.56.30.53"}`
+				if rec := do(h, "PUT", "/v1/ipsec", body, "tok"); rec.Code != http.StatusNoContent {
+					t.Fatalf("ipsec code %d", rec.Code)
+				}
+			}
+			if got := protocolsOf(t, h); got != c.want {
+				t.Fatalf("protocols = %s", got)
+			}
+		})
+	}
+}
+
+func TestPutIPsecSamePSKNoReload(t *testing.T) {
+	e, p := newPPPEnv(t)
+	h := e.svc.Handler("tok")
+	before := p.rt.applies
+	body := `{"psk":"` + testPSK + `","localId":"hub1.example.net"}`
+	if rec := do(h, "PUT", "/v1/ipsec", body, "tok"); rec.Code != http.StatusNoContent {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if p.rt.applies != before {
+		t.Fatalf("same PSK and local id re-applied IPsec (%d -> %d)", before, p.rt.applies)
+	}
+	other := `{"psk":"` + strings.Repeat("z", 32) + `","localId":"hub1.example.net"}`
+	if rec := do(h, "PUT", "/v1/ipsec", other, "tok"); rec.Code != http.StatusNoContent {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if p.rt.applies != before+1 || !strings.Contains(p.rt.ipsec, strings.Repeat("z", 32)) {
+		t.Fatalf("new PSK not applied: %d applies", p.rt.applies)
+	}
+	moved := `{"psk":"` + strings.Repeat("z", 32) + `","localId":"hub2.example.net"}`
+	if rec := do(h, "PUT", "/v1/ipsec", moved, "tok"); rec.Code != http.StatusNoContent {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !strings.Contains(p.rt.ipsec, "id = hub2.example.net") {
+		t.Fatalf("new local id not applied: %s", p.rt.ipsec)
+	}
+}
+
+func TestPutIPsecRejectsBadBody(t *testing.T) {
+	_, h := apiEnv(t)
+	psk := testPSK
+	for name, body := range map[string]string{
+		"short psk":      `{"psk":"short","localId":"hub1.example.net"}`,
+		"psk with quote": `{"psk":"` + psk + `\"","localId":"hub1.example.net"}`,
+		"long psk":       `{"psk":"` + strings.Repeat("a", 129) + `","localId":"hub1.example.net"}`,
+		"no local id":    `{"psk":"` + psk + `"}`,
+		"bad local id":   `{"psk":"` + psk + `","localId":"hub one"}`,
+		"ipv6 local id":  `{"psk":"` + psk + `","localId":"2001:db8::1"}`,
+		"not json":       `psk`,
+	} {
+		if rec := do(h, "PUT", "/v1/ipsec", body, "tok"); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: code %d", name, rec.Code)
+		}
 	}
 }

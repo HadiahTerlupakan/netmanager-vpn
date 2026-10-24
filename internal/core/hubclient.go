@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"time"
 
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 )
@@ -28,6 +30,44 @@ const (
 // ErrHubAddressInUse means the hub already carries another peer on that address.
 var ErrHubAddressInUse = errors.New("core: hub says the address is in use")
 
+// errHubNoRoute is a 404: on /v1/ipsec and /v1/info it means a hub built
+// before L2TP, which serves WireGuard only.
+var errHubNoRoute = errors.New("core: hub has no such route")
+
+// PeerSpec is one router peer as a hub is told to carry it. PPPPassword is in
+// the clear; it is sent only for L2TP.
+type PeerSpec struct {
+	PublicKey   string
+	Address     netip.Addr
+	Protocol    string
+	PPPUser     string
+	PPPPassword string
+}
+
+// HubInfo is what a hub reports about itself.
+type HubInfo struct {
+	Protocols []string
+}
+
+// peerBody, ipsecBody and infoBody mirror hub.PutPeerRequest,
+// hub.PutIPsecRequest and hub.InfoResponse; the client contract test pins
+// them together.
+type peerBody struct {
+	Address     string `json:"address"`
+	Protocol    string `json:"protocol"`
+	PPPUsername string `json:"pppUsername,omitempty"`
+	PPPPassword string `json:"pppPassword,omitempty"`
+}
+
+type ipsecBody struct {
+	PSK     string `json:"psk"`
+	LocalID string `json:"localId"`
+}
+
+type infoBody struct {
+	Protocols []string `json:"protocols"`
+}
+
 // HubPeerStatus mirrors the JSON of hub.PeerStatus. It is declared here so the
 // core need not import the hub service; the client contract test pins the two
 // together.
@@ -41,9 +81,15 @@ type HubPeerStatus struct {
 
 // HubClient is the core's view of a hub's peer API.
 type HubClient interface {
-	UpsertPeer(ctx context.Context, hub store.Hub, pub string, addr netip.Addr) error
+	UpsertPeer(ctx context.Context, hub store.Hub, spec PeerSpec) error
 	DeletePeer(ctx context.Context, hub store.Hub, pub string) error
 	Peers(ctx context.Context, hub store.Hub) ([]HubPeerStatus, error)
+	// SetIPsecPSK gives the hub its L2TP pre-shared key, with its public host
+	// as the IPsec identity. A hub without the route takes it as a no-op.
+	SetIPsecPSK(ctx context.Context, hub store.Hub, psk string) error
+	// Info reports the hub's protocols; a hub without the route is
+	// WireGuard-only.
+	Info(ctx context.Context, hub store.Hub) (HubInfo, error)
 }
 
 type httpHubClient struct {
@@ -64,10 +110,36 @@ func newHTTPHubClient(box *secret.Box, baseURL func(store.Hub) string) HubClient
 	return &httpHubClient{box: box, http: &http.Client{Timeout: hubAPITimeout}, baseURL: baseURL}
 }
 
-func (c *httpHubClient) UpsertPeer(ctx context.Context, h store.Hub, pub string, addr netip.Addr) error {
-	body, _ := json.Marshal(map[string]string{"address": addr.String()})
-	_, err := c.do(ctx, h, http.MethodPut, "/v1/peers/"+url.PathEscape(pub), body)
+func (c *httpHubClient) UpsertPeer(ctx context.Context, h store.Hub, spec PeerSpec) error {
+	body, _ := json.Marshal(peerBody{Address: spec.Address.String(), Protocol: spec.Protocol,
+		PPPUsername: spec.PPPUser, PPPPassword: spec.PPPPassword})
+	_, err := c.do(ctx, h, http.MethodPut, "/v1/peers/"+url.PathEscape(spec.PublicKey), body)
 	return err
+}
+
+func (c *httpHubClient) SetIPsecPSK(ctx context.Context, h store.Hub, psk string) error {
+	body, _ := json.Marshal(ipsecBody{PSK: psk, LocalID: h.PublicHost})
+	_, err := c.do(ctx, h, http.MethodPut, "/v1/ipsec", body)
+	if errors.Is(err, errHubNoRoute) {
+		slog.Debug("hub predates L2TP; PSK not pushed", "hub", h.ID)
+		return nil
+	}
+	return err
+}
+
+func (c *httpHubClient) Info(ctx context.Context, h store.Hub) (HubInfo, error) {
+	raw, err := c.do(ctx, h, http.MethodGet, "/v1/info", nil)
+	if errors.Is(err, errHubNoRoute) {
+		return HubInfo{Protocols: []string{routeros.ProtocolWireGuard}}, nil
+	}
+	if err != nil {
+		return HubInfo{}, err
+	}
+	var out infoBody
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return HubInfo{}, fmt.Errorf("core: hub info: %w", err)
+	}
+	return HubInfo(out), nil
 }
 
 func (c *httpHubClient) DeletePeer(ctx context.Context, h store.Hub, pub string) error {
@@ -113,7 +185,11 @@ func (c *httpHubClient) do(ctx context.Context, h store.Hub, method, path string
 		if len(raw) > maxErrBody {
 			raw = raw[:maxErrBody]
 		}
-		return nil, fmt.Errorf("core: hub %s %s: status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(raw))
+		err := fmt.Errorf("core: hub %s %s: status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(raw))
+		if resp.StatusCode == http.StatusNotFound {
+			err = errors.Join(errHubNoRoute, err)
+		}
+		return nil, err
 	}
 	return raw, nil
 }

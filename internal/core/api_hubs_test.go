@@ -17,7 +17,7 @@ func TestHubUpgradeCommandIsPlainText(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
 		t.Fatalf("%d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
-	want := "curl -fsSL https://example.test/install-hub.sh | $(command -v sudo) env NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 sh -s -- upgrade"
+	want := "curl -fsSL https://example.test/install-hub.sh | $(command -v sudo) env NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 NMVPN_PORTS=\"51821/udp 500/udp 4500/udp\" sh -s -- upgrade"
 	if rec.Body.String() != want {
 		t.Fatalf("command = %q", rec.Body)
 	}

@@ -1,8 +1,11 @@
 package wgdevice
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"syscall"
 )
 
 // planRoutes decides which link routes the interface needs added and which of
@@ -47,4 +50,38 @@ func planRoutes(cfg Config, existing []*net.IPNet) (add []*net.IPNet, stale map[
 		add = append(add, network)
 	}
 	return add, stale, nil
+}
+
+// addRoutes adds each route with add and carries on past one that fails, so a
+// collision on one peer's address cannot leave every later peer unrouted.
+// holder names the link that holds a route add was refused for.
+//
+// A route held by a yieldTo link (a PPP session the hub is ending as its
+// router moves to WireGuard) is skipped, not replaced: the session's teardown
+// is asynchronous, and a failed terminate leaves it up, so the link may still
+// be carrying the router. Waiting costs a reconcile pass; RouteReplace would
+// take the route from a link that still holds it. Any other collision fails
+// loudly rather than hijack a route someone else put there.
+func addRoutes(nets []*net.IPNet, yieldTo string, add func(*net.IPNet) error, holder func(*net.IPNet) string) error {
+	var errs []error
+	var busy []string
+	for _, n := range nets {
+		err := add(n)
+		switch {
+		case err == nil:
+		case !errors.Is(err, syscall.EEXIST):
+			errs = append(errs, fmt.Errorf("add route %s: %w", n, err))
+		case yieldTo != "" && strings.HasPrefix(holder(n), yieldTo):
+			busy = append(busy, n.String())
+		default:
+			errs = append(errs, fmt.Errorf("add route %s: already routed via another interface, remove the conflicting route or change the peer's subnet: %w", n, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if len(busy) > 0 {
+		return fmt.Errorf("%w: %s", ErrRouteBusy, strings.Join(busy, ", "))
+	}
+	return nil
 }

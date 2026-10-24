@@ -6,13 +6,14 @@ import (
 
 func (c *Core) createRouter(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Label  string   `json:"label"`
-		HubIDs []string `json:"hubIds"`
+		Label    string   `json:"label"`
+		HubIDs   []string `json:"hubIds"`
+		Protocol string   `json:"protocol"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	v, err := c.CreateRouter(r.Context(), in.Label, in.HubIDs)
+	v, err := c.CreateRouter(r.Context(), in.Label, in.HubIDs, in.Protocol)
 	reply(w, r, v, err)
 }
 
@@ -64,6 +65,37 @@ func (c *Core) routerScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeText(w, s)
+}
+
+type protocolRequest struct {
+	Protocol string `json:"protocol"`
+}
+
+func (c *Core) protocolScript(w http.ResponseWriter, r *http.Request) {
+	var in protocolRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	s, err := c.ProtocolScript(r.PathValue("id"), in.Protocol)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeText(w, s)
+}
+
+func (c *Core) setRouterProtocol(w http.ResponseWriter, r *http.Request) {
+	var in protocolRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	v, err := c.SetRouterProtocol(r.Context(), r.PathValue("id"), in.Protocol)
+	reply(w, r, v, err)
+}
+
+func (c *Core) firstServer(w http.ResponseWriter, r *http.Request) {
+	v, err := c.FirstServer(r.PathValue("id"))
+	reply(w, r, v, err)
 }
 
 func (c *Core) listAdminPeers(w http.ResponseWriter, r *http.Request) {

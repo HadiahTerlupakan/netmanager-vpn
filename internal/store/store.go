@@ -114,6 +114,19 @@ var migrations = []string{
 	`ALTER TABLE routers ADD COLUMN active_hub_id TEXT;`,
 	// A hub that joined before the port was carried listened on the default.
 	`ALTER TABLE hub_config ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 51821;`,
+	// L2TP/IPsec joins WireGuard as a second way for a router to reach its hub.
+	// Every column defaults to what a WireGuard-only deployment already is, so
+	// existing rows read back unchanged.
+	`ALTER TABLE routers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'wireguard';`,
+	`ALTER TABLE routers ADD COLUMN ppp_user TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE routers ADD COLUMN ppp_password TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE hubs ADD COLUMN ipsec_psk TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE hubs ADD COLUMN protocols TEXT NOT NULL DEFAULT 'wireguard';`,
+	`ALTER TABLE hub_config ADD COLUMN ipsec_psk TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE peers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'wireguard';`,
+	`ALTER TABLE peers ADD COLUMN ppp_user TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE peers ADD COLUMN ppp_password TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE hub_config ADD COLUMN ipsec_local_id TEXT NOT NULL DEFAULT '';`,
 }
 
 // Open opens (creating if needed) the database at path and applies pending

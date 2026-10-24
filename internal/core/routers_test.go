@@ -14,7 +14,10 @@ import (
 type peerCall struct {
 	hubID, pub string
 	addr       netip.Addr
+	spec       PeerSpec
 }
+
+type pskCall struct{ hubID, psk string }
 
 type recHubs struct {
 	mu          sync.Mutex
@@ -22,7 +25,10 @@ type recHubs struct {
 	deletes     []peerCall
 	failUpserts int
 	failDeletes bool
+	failPSK     bool
 	present     map[string]map[string]bool // hub ID -> public keys it carries
+	psks        []pskCall
+	protocols   map[string][]string // hub ID -> what Info reports; wireguard when unset
 	// beforeUpsert and onPeers run once, outside the lock, so a hook may call
 	// back into the core to simulate a concurrent change.
 	beforeUpsert func()
@@ -36,7 +42,7 @@ func (r *recHubs) add(hubID, pub string) {
 	r.present[hubID][pub] = true
 }
 
-func (r *recHubs) UpsertPeer(_ context.Context, h store.Hub, pub string, addr netip.Addr) error {
+func (r *recHubs) UpsertPeer(_ context.Context, h store.Hub, spec PeerSpec) error {
 	r.mu.Lock()
 	hook := r.beforeUpsert
 	r.beforeUpsert = nil
@@ -50,8 +56,8 @@ func (r *recHubs) UpsertPeer(_ context.Context, h store.Hub, pub string, addr ne
 		r.failUpserts--
 		return errors.New("hub unreachable")
 	}
-	r.upserts = append(r.upserts, peerCall{h.ID, pub, addr})
-	r.add(h.ID, pub)
+	r.upserts = append(r.upserts, peerCall{h.ID, spec.PublicKey, spec.Address, spec})
+	r.add(h.ID, spec.PublicKey)
 	return nil
 }
 
@@ -83,6 +89,25 @@ func (r *recHubs) Peers(_ context.Context, h store.Hub) ([]HubPeerStatus, error)
 	return out, nil
 }
 
+func (r *recHubs) SetIPsecPSK(_ context.Context, h store.Hub, psk string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failPSK {
+		return errors.New("hub unreachable")
+	}
+	r.psks = append(r.psks, pskCall{h.ID, psk})
+	return nil
+}
+
+func (r *recHubs) Info(_ context.Context, h store.Hub) (HubInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.protocols[h.ID]; ok {
+		return HubInfo{Protocols: p}, nil
+	}
+	return HubInfo{Protocols: []string{"wireguard"}}, nil
+}
+
 func routerFixture(t *testing.T, hubCount int) (fixture, *recHubs, []store.Hub) {
 	t.Helper()
 	f := newFixture(t)
@@ -104,7 +129,7 @@ func routerFixture(t *testing.T, hubCount int) (fixture, *recHubs, []store.Hub) 
 
 func TestCreateRouterRegistersOnEveryHub(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 2)
-	v, err := f.core.CreateRouter(context.Background(), "cust-1", []string{hubs[0].ID, hubs[1].ID})
+	v, err := f.core.CreateRouter(context.Background(), "cust-1", []string{hubs[0].ID, hubs[1].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +158,7 @@ func TestCreateRouterRejectsOfflineHub(t *testing.T) {
 	if err := f.st.UpdateHubStatus(hubs[1].ID, store.HubStatusPendingInstall, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[1].ID})
+	_, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[1].ID}, "")
 	if !errors.Is(err, ErrValidation) || len(rec.upserts) != 0 {
 		t.Fatalf("err = %v, upserts = %d", err, len(rec.upserts))
 	}
@@ -144,7 +169,7 @@ func TestCreateRouterRejectsOfflineHub(t *testing.T) {
 
 func TestCreateRouterRejectsDuplicateHub(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
-	_, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[0].ID})
+	_, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[0].ID}, "")
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("err = %v", err)
 	}
@@ -152,7 +177,7 @@ func TestCreateRouterRejectsDuplicateHub(t *testing.T) {
 
 func TestCreateRouterRejectsUnknownHub(t *testing.T) {
 	f, _, _ := routerFixture(t, 1)
-	_, err := f.core.CreateRouter(context.Background(), "x", []string{"nope"})
+	_, err := f.core.CreateRouter(context.Background(), "x", []string{"nope"}, "")
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("err = %v", err)
 	}
@@ -161,7 +186,7 @@ func TestCreateRouterRejectsUnknownHub(t *testing.T) {
 func TestUnreachableHubMarkedPendingThenSynced(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 2)
 	rec.failUpserts = 1
-	v, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[1].ID})
+	v, err := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID, hubs[1].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +205,7 @@ func TestUnreachableHubMarkedPendingThenSynced(t *testing.T) {
 func TestSetRouterHubsRemovesDroppedHub(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 2)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID}, "")
 	if err := f.core.SetRouterHubs(ctx, v.ID, []string{hubs[1].ID}); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +220,7 @@ func TestSetRouterHubsRemovesDroppedHub(t *testing.T) {
 func TestExpirePendingAfter24h(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 1)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	now := time.Now()
 	if n, err := f.core.ExpirePending(ctx, now.Add(23*time.Hour)); err != nil || n != 0 {
 		t.Fatalf("23h: n=%d err=%v", n, err)
@@ -217,7 +242,7 @@ func TestExpirePendingAfter24h(t *testing.T) {
 func TestClaimedRouterNotExpired(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	if err := f.core.ClaimRouter(v.ID, "dev-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +261,7 @@ func TestClaimedRouterNotExpired(t *testing.T) {
 func TestSyncPendingPrunesStrangers(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 2)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	own := rec.upserts[0].pub
 	rec.add(hubs[0].ID, "stranger")
 	// Hub B does not carry this router, so its copy is stale too.
@@ -253,7 +278,7 @@ func TestSyncPendingPrunesStrangers(t *testing.T) {
 func TestDeleteRouterToleratesHubFailure(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 2)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID}, "")
 	rec.failDeletes = true
 	if err := f.core.DeleteRouter(ctx, v.ID); err != nil {
 		t.Fatal(err)
@@ -269,7 +294,7 @@ func TestPruneKeepsPeerRegisteredDuringSync(t *testing.T) {
 	var created RouterView
 	rec.onPeers = func() {
 		var err error
-		if created, err = f.core.CreateRouter(ctx, "late", []string{hubs[0].ID}); err != nil {
+		if created, err = f.core.CreateRouter(ctx, "late", []string{hubs[0].ID}, ""); err != nil {
 			t.Error(err)
 		}
 	}
@@ -289,7 +314,7 @@ func TestSyncPendingSkipsRouterDeletedMidPush(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 1)
 	ctx := context.Background()
 	rec.failUpserts = 1
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	rt, _ := f.st.GetRouter(v.ID)
 	rec.beforeUpsert = func() {
 		if err := f.core.DeleteRouter(ctx, v.ID); err != nil {
@@ -308,7 +333,7 @@ func TestPushPeerSkipsRevokedRouter(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 1)
 	ctx := context.Background()
 	rec.failUpserts = 1
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	rt, _ := f.st.GetRouter(v.ID)
 	if err := f.core.DeleteRouter(ctx, v.ID); err != nil {
 		t.Fatal(err)
@@ -322,7 +347,7 @@ func TestPushPeerSkipsRevokedRouter(t *testing.T) {
 func TestExpireSkipsRouterClaimedMeanwhile(t *testing.T) {
 	f, rec, hubs := routerFixture(t, 1)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
 	if err := f.core.ClaimRouter(v.ID, "dev-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +363,7 @@ func TestExpireSkipsRouterClaimedMeanwhile(t *testing.T) {
 func TestSetRouterHubsClearsActiveOnRemovedHub(t *testing.T) {
 	f, _, hubs := routerFixture(t, 2)
 	ctx := context.Background()
-	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID})
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID}, "")
 	f.core.active[v.ID] = hubs[0].ID
 	f.core.handshakes[v.ID] = testNow
 	if err := f.core.SetRouterHubs(ctx, v.ID, []string{hubs[1].ID}); err != nil {

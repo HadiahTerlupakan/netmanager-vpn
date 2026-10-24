@@ -40,11 +40,14 @@ func (f *fakeIPTables) Run(args ...string) (bool, error) {
 func TestDockerUserAcceptsInsertedOnce(t *testing.T) {
 	ipt := &fakeIPTables{chain: true}
 	for range 2 {
-		if err := EnsureDockerUserAccepts(ipt, HubDockerAccepts); err != nil {
+		if err := EnsureDockerUserAccepts(ipt, HubDockerAccepts(true)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	want := []string{"-i wg-nm -o wg-up -j ACCEPT", "-i wg-up -o wg-nm -j ACCEPT"}
+	want := []string{
+		"-i wg-nm -o wg-up -j ACCEPT", "-i wg-up -o wg-nm -j ACCEPT",
+		"-i nmppp+ -o wg-up -j ACCEPT", "-i wg-up -o nmppp+ -j ACCEPT",
+	}
 	if !slices.Equal(ipt.rules, want) {
 		t.Fatalf("rules = %v", ipt.rules)
 	}
@@ -59,8 +62,19 @@ func TestDockerUserAcceptsInsertedOnce(t *testing.T) {
 			inserts++
 		}
 	}
-	if inserts != 2 {
+	if inserts != 4 {
 		t.Fatalf("second pass inserted again: %v", ipt.calls)
+	}
+}
+
+func TestWireGuardOnlyHubAcceptsNoPPP(t *testing.T) {
+	for _, rule := range HubDockerAccepts(false) {
+		if strings.Contains(strings.Join(rule, " "), "ppp") {
+			t.Fatalf("WireGuard-only hub accepts %v", rule)
+		}
+	}
+	if len(HubDockerAccepts(false)) != 2 {
+		t.Fatalf("accepts = %v", HubDockerAccepts(false))
 	}
 }
 
@@ -86,7 +100,7 @@ func TestDockerUserCoreRule(t *testing.T) {
 
 func TestDockerUserReportsIPTablesFailure(t *testing.T) {
 	ipt := &fakeIPTables{chain: true, fail: errors.New("xtables lock")}
-	if err := EnsureDockerUserAccepts(ipt, HubDockerAccepts); err == nil {
+	if err := EnsureDockerUserAccepts(ipt, HubDockerAccepts(false)); err == nil {
 		t.Fatal("failure swallowed")
 	}
 }

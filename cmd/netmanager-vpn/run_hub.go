@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/firewall"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/hub"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/joinbundle"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/wgdevice"
@@ -23,9 +25,14 @@ const (
 	maxBundleBytes    = 16 << 10
 	reconcileRetry    = 10 * time.Second
 	reconcileInterval = time.Minute
+	// pppDir holds the daemons' files, PSK and PPP passwords among them. The
+	// installer mounts a tmpfs on /run/netmanager-vpn so they never reach the
+	// host's disk; every start rewrites them from the store. A container
+	// started without that mount keeps them on its overlay, which is on disk.
+	pppDir = "/run/netmanager-vpn/ppp"
 )
 
-func newHub(cfg config) (*hub.Service, *store.Store, error) {
+func openHub(cfg config) (*secret.Box, *store.Store, error) {
 	box, err := secret.NewBox(cfg.EncryptionKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("NMVPN_ENCRYPTION_KEY: %w", err)
@@ -34,7 +41,20 @@ func newHub(cfg config) (*hub.Service, *store.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, hub.Options{}), st, nil
+	return box, st, nil
+}
+
+// pppOptions wires L2TP/IPsec when the kernel can carry it; otherwise the hub
+// serves WireGuard alone and reports only that to the core. gw is the hub's
+// end of every session, which tells its sessions from other PPP links.
+func pppOptions(gw netip.Addr) (hub.Options, *ppp.Supervisor) {
+	if !ppp.HostSupported("/") {
+		slog.Info("hub serves WireGuard only: /dev/ppp or one of the l2tp_ppp, esp4, xfrm_user modules is missing")
+		return hub.Options{}, nil
+	}
+	slog.Info("hub serves WireGuard and L2TP/IPsec")
+	sup := ppp.NewSupervisor(pppDir)
+	return hub.Options{Sessions: ppp.NewLinuxSessions(gw, sup), PPP: sup}, sup
 }
 
 // readBundle returns arg, or the bundle read from stdin when arg is "-": an
@@ -66,16 +86,18 @@ func joinHub(arg string, stdin io.Reader) error {
 	if err != nil {
 		return err
 	}
-	svc, st, err := newHub(cfg)
+	// WireGuard-only: this process exits right after, and would leave any
+	// daemon it started behind. `hub run` starts them.
+	box, st, err := openHub(cfg)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	return svc.Join(b)
+	return hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, hub.Options{}).Join(b)
 }
 
 func runHub(ctx context.Context, cfg config) error {
-	svc, st, err := newHub(cfg)
+	box, st, err := openHub(cfg)
 	if err != nil {
 		return err
 	}
@@ -87,6 +109,11 @@ func runHub(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	opts, sup := pppOptions(hubCfg.BackhaulAddr)
+	if sup != nil {
+		defer sup.Close()
+	}
+	svc := hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, opts)
 	if !reconcileUntilOK(ctx, svc) {
 		return nil
 	}

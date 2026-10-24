@@ -1,6 +1,9 @@
 package wgdevice
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // PeerConfig is one peer as the kernel needs it. An empty Endpoint leaves the
 // peer's learned endpoint alone, which is what a NAT'd router peer needs.
@@ -20,7 +23,16 @@ type Config struct {
 	ListenPort    int
 	MTU           int
 	Peers         []PeerConfig
+	// YieldTo is a link name prefix. A route this interface wants that a link
+	// so named already holds is left to it, and Apply reports ErrRouteBusy
+	// once everything else is applied; empty, such a collision is an error.
+	YieldTo string
 }
+
+// ErrRouteBusy means only that some route is still held by a link named in
+// Config.YieldTo; everything else was applied, and the next Apply adds the
+// route once that link is gone.
+var ErrRouteBusy = errors.New("route still held by a link being torn down")
 
 // PeerStatus is one peer's live state as read back from the kernel.
 type PeerStatus struct {
