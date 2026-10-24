@@ -73,12 +73,14 @@ func TestRenderServerOrderPreserved(t *testing.T) {
 }
 
 // A re-paste runs over the tunnel it configures, so nothing that carries the
-// tunnel may be removed; only the switch script and its scheduler are replaced.
+// tunnel may be removed; only the switch script and its scheduler are replaced,
+// and an L2TP client renamed aside by a protocol change is dropped.
 func TestRenderIsIdempotentShape(t *testing.T) {
 	for _, line := range strings.Split(RenderFull(testInput()), "\n") {
 		if strings.Contains(line, " remove ") &&
 			!strings.HasPrefix(line, "/system script remove [find name=netmanager-vpn-switch]") &&
-			!strings.HasPrefix(line, "/system scheduler remove [find name=netmanager-vpn-switch]") {
+			!strings.HasPrefix(line, "/system scheduler remove [find name=netmanager-vpn-switch]") &&
+			line != "/interface l2tp-client remove [find name=netmanager-vpn-old]" {
 			t.Errorf("unexpected remove: %s", line)
 		}
 		if strings.Contains(line, " add ") && !strings.HasPrefix(line, "/system ") &&

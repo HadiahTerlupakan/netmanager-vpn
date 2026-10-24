@@ -60,11 +60,11 @@ const switchBody = `:global nmVpnFail
 :local settled true
 :if ([:typeof $nmVpnSwitchAt] = "time") do={ :if (($now - $nmVpnSwitchAt) < @GRACE@) do={ :set settled false } }
 :if ($settled) do={
-  :if ([/ping @CORE@ src-address=@ADDR@ count=@COUNT@ interval=1s] >= @OK@) do={ :set nmVpnFailCount 0 } else={ :set nmVpnFailCount ($nmVpnFailCount + 1) }
+@CHECK@
   :if ($nmVpnFailCount >= @FAILS@) do={
     :set nmVpnFailCount 0
-    :local id ([/interface wireguard peers find interface=@IFACE@]->0)
-    :local cur ([:tostr [/interface wireguard peers get $id endpoint-address]] . "|" . [/interface wireguard peers get $id endpoint-port] . "|" . [/interface wireguard peers get $id public-key])
+    :local id ([@FIND@]->0)
+    :local cur (@CUR@)
     :local curEp [:pick $cur 0 [:find $cur "|" [:find $cur "|"]]]
     :set ($nmVpnFail->$curEp) $now
     :local n [:len $servers]
@@ -85,7 +85,7 @@ const switchBody = `:global nmVpnFail
       :local host [:pick $next 0 $p]
       :local rest [:pick $next ($p + 1) [:len $next]]
       :set p [:find $rest "|"]
-      /interface wireguard peers set $id endpoint-address=$host endpoint-port=[:tonum [:pick $rest 0 $p]] public-key=[:pick $rest ($p + 1) [:len $rest]]
+      @SET@
       :set nmVpnSwitchAt $now
       :log warning ("@TAG@: pindah ke " . $host)
     }
@@ -93,14 +93,48 @@ const switchBody = `:global nmVpnFail
 }
 `
 
+// switchProto is what the switch script does differently per protocol: the
+// ping check, how it finds the tunnel object ($id), reads the current hub as
+// a server-list entry ($cur), and moves to $host with $rest holding the
+// entry's last two fields.
+type switchProto struct{ check, find, cur, set string }
+
+const wgPing = "[/ping @CORE@ src-address=@ADDR@ count=@COUNT@ interval=1s]"
+
+var wgSwitch = switchProto{
+	check: "  :if (" + wgPing + " >= @OK@) do={ :set nmVpnFailCount 0 } else={ :set nmVpnFailCount ($nmVpnFailCount + 1) }",
+	find:  "/interface wireguard peers find interface=" + ifaceName,
+	cur:   `[:tostr [/interface wireguard peers get $id endpoint-address]] . "|" . [/interface wireguard peers get $id endpoint-port] . "|" . [/interface wireguard peers get $id public-key]`,
+	set:   "/interface wireguard peers set $id endpoint-address=$host endpoint-port=[:tonum [:pick $rest 0 $p]] public-key=[:pick $rest ($p + 1) [:len $rest]]",
+}
+
+// l2tpSwitch: PPP puts the /32 on the l2tp interface, so while the tunnel is
+// down the ping has no source address. The on-error turns a ping that refuses
+// to run into a failed check instead of aborting the run before it counts.
+// Setting connect-to re-dials at once (seen on 7.24.5), which is the switch.
+var l2tpSwitch = switchProto{
+	check: "  :local got 0\n  :do { :set got " + wgPing + " } on-error={}\n" +
+		"  :if ($got >= @OK@) do={ :set nmVpnFailCount 0 } else={ :set nmVpnFailCount ($nmVpnFailCount + 1) }",
+	find: "/interface l2tp-client find name=" + ifaceName,
+	cur:  `[:tostr [/interface l2tp-client get $id connect-to]] . "|` + strconv.Itoa(l2tpPort) + `|" . [/interface l2tp-client get $id ipsec-secret]`,
+	set:  "/interface l2tp-client set $id connect-to=$host ipsec-secret=[:pick $rest ($p + 1) [:len $rest]]",
+}
+
 // SwitchSource returns the switch script body unescaped, for netmanager to
 // replace the server list through the API (/system/script/set source=).
 //
 // After two failed checks the current hub is marked failed for failHold and
-// the peer moves to the next unmarked hub in list order, or to the first when
-// all are marked. There is deliberately no return to the first hub: a
+// the tunnel moves to the next unmarked hub in list order, or to the first
+// when all are marked. There is deliberately no return to the first hub: a
 // flapping first hub would otherwise pull the router back and forth.
 func SwitchSource(in Input) string {
+	p := wgSwitch
+	if in.Protocol == ProtocolL2TP {
+		p = l2tpSwitch
+	}
+	body := strings.NewReplacer(
+		"@CHECK@", p.check, "@FIND@", p.find, "@CUR@", p.cur, "@SET@", p.set,
+	).Replace(switchBody)
 	return strings.NewReplacer(
 		"@SERVERS@", serverList(in),
 		"@CORE@", coreAddr,
@@ -110,17 +144,21 @@ func SwitchSource(in Input) string {
 		"@FAILS@", strconv.Itoa(failsToSwitch),
 		"@GRACE@", grace,
 		"@HOLD@", failHold,
-		"@IFACE@", ifaceName,
 		"@TAG@", tag,
-	).Replace(switchBody)
+	).Replace(body)
 }
 
-// serverList is the body of a RouterOS array of "host|port|key" entries; the
-// switch script and the re-paste check both compare the peer against it.
+// serverList is the body of a RouterOS array of "host|port|key" entries, the
+// key being the IPsec secret for L2TP; the switch script and the re-paste
+// check both compare the tunnel against it.
 func serverList(in Input) string {
 	entries := make([]string, len(in.Servers))
 	for i, s := range in.Servers {
-		entries[i] = str(s.Host + sep + strconv.Itoa(s.Port) + sep + s.PublicKey)
+		port, key := strconv.Itoa(s.Port), s.PublicKey
+		if in.Protocol == ProtocolL2TP {
+			port, key = strconv.Itoa(l2tpPort), s.IPsecSecret
+		}
+		entries[i] = str(s.Host + sep + port + sep + key)
 	}
 	return strings.Join(entries, ";")
 }

@@ -1,5 +1,6 @@
 // Package routeros renders the RouterOS v7 script an operator pastes into a
-// MikroTik terminal to make it a WireGuard client of the tenant's hubs.
+// MikroTik terminal to make it a WireGuard or L2TP/IPsec client of the
+// tenant's hubs.
 package routeros
 
 import (
@@ -10,19 +11,32 @@ import (
 	"strings"
 )
 
+// Protocols a router can join the VPN with; an empty Input.Protocol means
+// ProtocolWireGuard.
+const (
+	ProtocolWireGuard = "wireguard"
+	ProtocolL2TP      = "l2tp"
+)
+
 // Server is one hub the router may use; Input.Servers is in priority order.
+// PublicKey is used by WireGuard, IPsecSecret by L2TP.
 type Server struct {
-	Host      string
-	Port      int
-	PublicKey string
+	Host        string
+	Port        int
+	PublicKey   string
+	IPsecSecret string
 }
 
-// Input is what the script needs to know about one router.
+// Input is what the script needs to know about one router. PrivateKey is used
+// by WireGuard, PPPUser and PPPPassword by L2TP.
 type Input struct {
-	Label      string
-	Address    netip.Addr
-	PrivateKey string
-	Servers    []Server
+	Label       string
+	Address     netip.Addr
+	Protocol    string
+	PrivateKey  string
+	PPPUser     string
+	PPPPassword string
+	Servers     []Server
 }
 
 const (
@@ -38,6 +52,9 @@ const (
 	// The server list packs host, port and key into one string per entry;
 	// switchBody splits on the same character.
 	sep = "|"
+	// A protocol change renames the other protocol's interface here, because
+	// RouterOS will not give two interfaces the name ifaceName.
+	oldName = "netmanager-vpn-old"
 )
 
 // hostnameRE and hasLetterRE are the core's rule for a hub's public host
@@ -55,20 +72,47 @@ func (in Input) Validate() error {
 	if !in.Address.Is4() {
 		return errors.New("routeros: address must be IPv4")
 	}
-	if in.PrivateKey == "" {
-		return errors.New("routeros: private key is empty")
-	}
 	if len(in.Servers) == 0 {
 		return errors.New("routeros: no servers")
 	}
 	for i, s := range in.Servers {
-		switch {
-		case !validHost(s.Host):
+		if !validHost(s.Host) {
 			return fmt.Errorf("routeros: server %d: bad host %q", i, s.Host)
+		}
+	}
+	switch in.Protocol {
+	case "", ProtocolWireGuard:
+		return in.validateWireGuard()
+	case ProtocolL2TP:
+		return in.validateL2TP()
+	}
+	return fmt.Errorf("routeros: unknown protocol %q", in.Protocol)
+}
+
+func (in Input) validateWireGuard() error {
+	if in.PrivateKey == "" {
+		return errors.New("routeros: private key is empty")
+	}
+	for i, s := range in.Servers {
+		switch {
 		case s.Port < 1 || s.Port > 65535:
 			return fmt.Errorf("routeros: server %d: bad port %d", i, s.Port)
 		case s.PublicKey == "" || strings.Contains(s.PublicKey, sep):
 			return fmt.Errorf("routeros: server %d: bad public key", i)
+		}
+	}
+	return nil
+}
+
+// validateL2TP leaves Server.Port alone: the client always dials IKE on
+// l2tpPort, so the port is not part of the script.
+func (in Input) validateL2TP() error {
+	if in.PPPUser == "" || in.PPPPassword == "" {
+		return errors.New("routeros: PPP user or password is empty")
+	}
+	for i, s := range in.Servers {
+		if s.IPsecSecret == "" || strings.Contains(s.IPsecSecret, sep) {
+			return fmt.Errorf("routeros: server %d: bad IPsec secret", i)
 		}
 	}
 	return nil
@@ -81,32 +125,52 @@ func validHost(h string) bool {
 	return len(h) <= 253 && hostnameRE.MatchString(h) && hasLetterRE.MatchString(h)
 }
 
-// RenderFull returns the whole script: loopback, tunnel on Servers[0],
-// routing, then the switch script and scheduler. Pasting it again converges
-// on the same state without taking the tunnel down.
+// RenderFull returns the whole script for in.Protocol. For WireGuard that is
+// loopback, tunnel on Servers[0], routing, the switch script and scheduler,
+// then the removal of an L2TP client a protocol change left behind. Pasting
+// it again converges on the same state without taking the tunnel down.
 func RenderFull(in Input) string {
+	if in.Protocol == ProtocolL2TP {
+		return renderL2TP(in)
+	}
 	var b strings.Builder
 	addr := in.Address.String()
 	ensure(&b, "/interface bridge", "name="+loName,
 		"name="+loName, "comment="+str(tag))
 	ensure(&b, "/ip address", "interface="+loName+" comment="+str(tag),
 		"interface="+loName, "address="+addr+"/32 network="+addr+" comment="+str(tag))
+	writeRename(&b, "/interface l2tp-client")
 	ensure(&b, "/interface wireguard", "name="+ifaceName,
 		"name="+ifaceName+" private-key="+str(in.PrivateKey),
 		fmt.Sprintf("mtu=%d comment=%s", mtu, str(tag+": "+in.Label)))
 	fmt.Fprintf(&b, ":if ([/interface wireguard get [find name=%s] private-key] != %s) do={ /interface wireguard set [find name=%s] private-key=%s }\n",
 		ifaceName, str(in.PrivateKey), ifaceName, str(in.PrivateKey))
 	writePeer(&b, in)
-	ensure(&b, "/routing table", "name="+tableName,
+	writeRouting(&b, addr)
+	b.WriteString(RenderScheduler(in))
+	fmt.Fprintf(&b, "/interface l2tp-client remove [find name=%s]\n", oldName)
+	return b.String()
+}
+
+// writeRename moves the other protocol's interface off ifaceName so this
+// protocol's can take it. Only the name changes: the old interface keeps its
+// session and settings until the script removes it at the end.
+func writeRename(b *strings.Builder, path string) {
+	fmt.Fprintf(b, ":if ([:len [%s find name=%s]] > 0) do={ %s set [find name=%s] name=%s }\n",
+		path, ifaceName, path, ifaceName, oldName)
+}
+
+// writeRouting sends the backhaul subnets through ifaceName from addr, in our
+// own table so the operator's main table is not touched.
+func writeRouting(b *strings.Builder, addr string) {
+	ensure(b, "/routing table", "name="+tableName,
 		"name="+tableName+" fib", "comment="+str(tag))
-	writeRules(&b)
+	writeRules(b)
 	for _, s := range subnets {
-		ensure(&b, "/ip route", "comment="+str(tag)+" dst-address="+s,
+		ensure(b, "/ip route", "comment="+str(tag)+" dst-address="+s,
 			"dst-address="+s,
 			"gateway="+ifaceName+" routing-table="+tableName+" pref-src="+addr+" comment="+str(tag))
 	}
-	b.WriteString(RenderScheduler(in))
-	return b.String()
 }
 
 // writePeer creates the peer on Servers[0]. An existing peer is moved there
