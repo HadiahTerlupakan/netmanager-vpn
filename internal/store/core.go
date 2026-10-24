@@ -2,20 +2,22 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"strings"
 	"time"
 )
 
 const hubCols = `id, name, public_host, listen_port, backhaul_addr, public_key, private_key,
-	api_token, status, join_expires_at, last_seen_at, created_at`
+	api_token, status, join_expires_at, last_seen_at, created_at, ipsec_psk, protocols`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanHub(r scanner) (Hub, error) {
 	var h Hub
-	var addr, joinExp, created string
+	var addr, joinExp, created, protocols string
 	var seen sql.NullString
 	err := r.Scan(&h.ID, &h.Name, &h.PublicHost, &h.ListenPort, &addr, &h.PublicKey,
-		&h.PrivateKey, &h.APIToken, &h.Status, &joinExp, &seen, &created)
+		&h.PrivateKey, &h.APIToken, &h.Status, &joinExp, &seen, &created, &h.IPsecPSK, &protocols)
 	if err != nil {
 		return Hub{}, err
 	}
@@ -28,6 +30,7 @@ func scanHub(r scanner) (Hub, error) {
 	if h.LastSeenAt, err = parseTimePtr(seen); err != nil {
 		return Hub{}, err
 	}
+	h.Protocols = splitProtocols(protocols)
 	h.CreatedAt, err = parseTime(created)
 	return h, err
 }
@@ -36,10 +39,10 @@ func scanHub(r scanner) (Hub, error) {
 func (s *Store) CreateHub(h Hub) (Hub, error) {
 	h.ID = newID()
 	h.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO hubs (`+hubCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT INTO hubs (`+hubCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		h.ID, h.Name, h.PublicHost, h.ListenPort, h.BackhaulAddr.String(), h.PublicKey,
 		h.PrivateKey, h.APIToken, h.Status, fmtTime(h.JoinExpiresAt), fmtTimePtr(h.LastSeenAt),
-		fmtTime(h.CreatedAt))
+		fmtTime(h.CreatedAt), h.IPsecPSK, joinProtocols(h.Protocols))
 	if err != nil {
 		return Hub{}, conflictOr(err)
 	}
@@ -85,6 +88,44 @@ func (s *Store) UpdateHubKeys(id, publicKey, sealedPrivateKey, apiToken string, 
 	return affected(s.db.Exec(
 		`UPDATE hubs SET public_key = ?, private_key = ?, api_token = ?, join_expires_at = ? WHERE id = ?`,
 		publicKey, sealedPrivateKey, apiToken, fmtTime(joinExpiresAt), id))
+}
+
+// UpdateHubPSK stores the hub's IPsec pre-shared key, already sealed.
+func (s *Store) UpdateHubPSK(id, sealedPSK string) error {
+	return affected(s.db.Exec(`UPDATE hubs SET ipsec_psk = ? WHERE id = ?`, sealedPSK, id))
+}
+
+// UpdateHubProtocols records which protocols the hub serves. An empty list is
+// refused: a hub that serves nothing cannot be told apart from a stale row.
+func (s *Store) UpdateHubProtocols(id string, protocols []string) error {
+	if len(protocols) == 0 {
+		return errors.New("store: hub protocols must not be empty")
+	}
+	return affected(s.db.Exec(`UPDATE hubs SET protocols = ? WHERE id = ?`, joinProtocols(protocols), id))
+}
+
+const protocolWireGuard = "wireguard"
+
+// orWireGuard applies the column default to a caller that left the protocol unset.
+func orWireGuard(p string) string {
+	if p == "" {
+		return protocolWireGuard
+	}
+	return p
+}
+
+func joinProtocols(p []string) string {
+	if len(p) == 0 {
+		return protocolWireGuard
+	}
+	return strings.Join(p, ",")
+}
+
+func splitProtocols(s string) []string {
+	if s == "" {
+		return []string{protocolWireGuard}
+	}
+	return strings.Split(s, ",")
 }
 
 // DeleteHub removes a hub, or returns ErrInUse while any router lists it.

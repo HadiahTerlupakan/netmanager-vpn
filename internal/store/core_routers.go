@@ -7,14 +7,15 @@ import (
 	"time"
 )
 
-const routerCols = `id, label, ref, address, public_key, private_key, status, created_at, released_at`
+const routerCols = `id, label, ref, address, public_key, private_key, status, created_at, released_at,
+	protocol, ppp_user, ppp_password`
 
 func scanRouter(r scanner) (Router, error) {
 	var rt Router
 	var addr, created string
 	var released sql.NullString
 	err := r.Scan(&rt.ID, &rt.Label, &rt.Ref, &addr, &rt.PublicKey, &rt.PrivateKey,
-		&rt.Status, &created, &released)
+		&rt.Status, &created, &released, &rt.Protocol, &rt.PPPUser, &rt.PPPPassword)
 	if err != nil {
 		return Router{}, err
 	}
@@ -32,9 +33,9 @@ func scanRouter(r scanner) (Router, error) {
 func (s *Store) CreateRouter(r Router) (Router, error) {
 	r.ID = newID()
 	r.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO routers (`+routerCols+`) VALUES (?,?,?,?,?,?,?,?,NULL)`,
+	_, err := s.db.Exec(`INSERT INTO routers (`+routerCols+`) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)`,
 		r.ID, r.Label, r.Ref, r.Address.String(), r.PublicKey, r.PrivateKey, r.Status,
-		fmtTime(r.CreatedAt))
+		fmtTime(r.CreatedAt), orWireGuard(r.Protocol), r.PPPUser, r.PPPPassword)
 	if err != nil {
 		return Router{}, conflictOr(err)
 	}
@@ -68,6 +69,14 @@ func (s *Store) ListRouters() ([]Router, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// SetRouterProtocol switches how an unreleased router reaches its hubs and
+// stores its PPP login; the password arrives sealed.
+func (s *Store) SetRouterProtocol(id, protocol, pppUser, sealedPPPPassword string) error {
+	return affected(s.db.Exec(
+		`UPDATE routers SET protocol = ?, ppp_user = ?, ppp_password = ? WHERE id = ? AND released_at IS NULL`,
+		protocol, pppUser, sealedPPPPassword, id))
 }
 
 // ClaimRouter marks a pending router as claimed by its device and records the

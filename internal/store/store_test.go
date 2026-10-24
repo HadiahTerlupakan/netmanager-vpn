@@ -527,3 +527,157 @@ func TestBackupToRemovesPartialFileOnFailure(t *testing.T) {
 		t.Fatal("partial file left behind")
 	}
 }
+
+func TestRouterDefaultsToWireGuard(t *testing.T) {
+	s := openTemp(t)
+	r := newRouter(t, s, "r1", "10.9.0.2")
+	if r.Protocol != "wireguard" || r.PPPUser != "" || r.PPPPassword != "" {
+		t.Fatalf("defaults = %q/%q/%q", r.Protocol, r.PPPUser, r.PPPPassword)
+	}
+}
+
+func TestSetRouterProtocolRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	r := newRouter(t, s, "r1", "10.9.0.2")
+	if err := s.SetRouterProtocol(r.ID, "l2tp", "ppp-r1", "sealed-pw"); err != nil {
+		t.Fatalf("SetRouterProtocol: %v", err)
+	}
+	got, err := s.GetRouter(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Protocol != "l2tp" || got.PPPUser != "ppp-r1" || got.PPPPassword != "sealed-pw" {
+		t.Fatalf("got %q/%q/%q", got.Protocol, got.PPPUser, got.PPPPassword)
+	}
+	if err := s.SetRouterProtocol("missing", "l2tp", "u", "p"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing router: %v", err)
+	}
+	if err := s.DeleteRouter(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRouterProtocol(r.ID, "wireguard", "", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("released router: %v", err)
+	}
+}
+
+func TestHubProtocolsRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	h := newHub(t, s, "h1", "10.8.0.2")
+	if got := h.Protocols; len(got) != 1 || got[0] != "wireguard" {
+		t.Fatalf("default protocols = %v", got)
+	}
+	want := []string{"wireguard", "l2tp"}
+	if err := s.UpdateHubProtocols(h.ID, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateHubPSK(h.ID, "sealed-psk"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetHub(h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got.Protocols) != fmt.Sprint(want) || got.IPsecPSK != "sealed-psk" {
+		t.Fatalf("got %v / %q", got.Protocols, got.IPsecPSK)
+	}
+	if err := s.UpdateHubProtocols(h.ID, nil); err == nil {
+		t.Fatal("empty list accepted")
+	}
+	if err := s.UpdateHubProtocols("missing", want); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing hub: %v", err)
+	}
+	if err := s.UpdateHubPSK("missing", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing hub psk: %v", err)
+	}
+}
+
+func TestUpsertPeerKeepsPPPFields(t *testing.T) {
+	s := openTemp(t)
+	a := netip.MustParseAddr("10.9.0.2")
+	if err := s.UpsertPeer(Peer{PublicKey: "k", Address: a}); err != nil {
+		t.Fatal(err)
+	}
+	first := must(s.ListPeers())[0]
+	if first.Protocol != "wireguard" {
+		t.Fatalf("default protocol = %q", first.Protocol)
+	}
+	b := netip.MustParseAddr("10.9.0.3")
+	if err := s.UpsertPeer(Peer{PublicKey: "k", Address: b, Protocol: "l2tp", PPPUser: "u", PPPPassword: "sealed"}); err != nil {
+		t.Fatal(err)
+	}
+	got := must(s.ListPeers())
+	if len(got) != 1 {
+		t.Fatalf("peers = %d", len(got))
+	}
+	p := got[0]
+	if p.Address != b || p.Protocol != "l2tp" || p.PPPUser != "u" || p.PPPPassword != "sealed" {
+		t.Fatalf("peer = %+v", p)
+	}
+	if !p.CreatedAt.Equal(first.CreatedAt) {
+		t.Fatalf("created_at changed: %v -> %v", first.CreatedAt, p.CreatedAt)
+	}
+}
+
+func TestSaveHubPSK(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SaveHubPSK("sealed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("before join: %v", err)
+	}
+	cfg := HubConfig{CorePublicKey: "c", CoreEndpoint: "e:1", BackhaulAddr: netip.MustParseAddr("10.8.0.2"),
+		ListenPort: 51821, APIToken: "t", PrivateKeyUp: "u", PrivateKeyNM: "n"}
+	if err := s.SaveHubConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveHubPSK("sealed"); err != nil {
+		t.Fatal(err)
+	}
+	if got := must(s.LoadHubConfig()); got.IPsecPSK != "sealed" || got.APIToken != "t" {
+		t.Fatalf("config = %+v", got)
+	}
+}
+
+// Released builds hold the first three migrations; an upgrade must keep their rows.
+func TestMigrationFromPreviousSchema(t *testing.T) {
+	const released = 3
+	full := migrations
+	t.Cleanup(func() { migrations = full })
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	migrations = full[:released]
+	old, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = old.db.Exec(`INSERT INTO routers (id, label, ref, address, public_key, private_key, status, created_at)
+		VALUES ('r1','l','ref','10.9.0.2','pk','sk','active','2026-01-01T00:00:00.000000000Z');
+		INSERT INTO hubs (id, name, public_host, listen_port, backhaul_addr, public_key, private_key, api_token, status, join_expires_at, created_at)
+		VALUES ('h1','h','h.example.net',51821,'10.8.0.2','pk','sk','tok','online','2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z');
+		INSERT INTO hub_config (id, core_public_key, core_endpoint, backhaul_addr, api_token, private_key_up, private_key_nm)
+		VALUES (1,'c','e:1','10.8.0.2','t','u','n');
+		INSERT INTO peers (public_key, address, created_at) VALUES ('pk','10.9.0.2','2026-01-01T00:00:00.000000000Z');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	migrations = full
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	defer s.Close()
+	r := must(s.GetRouter("r1"))
+	if r.Protocol != "wireguard" || r.PPPUser != "" || r.PPPPassword != "" {
+		t.Fatalf("router = %+v", r)
+	}
+	h := must(s.GetHub("h1"))
+	if fmt.Sprint(h.Protocols) != "[wireguard]" || h.IPsecPSK != "" {
+		t.Fatalf("hub = %+v", h)
+	}
+	if c := must(s.LoadHubConfig()); c.IPsecPSK != "" {
+		t.Fatalf("config = %+v", c)
+	}
+	if p := must(s.ListPeers())[0]; p.Protocol != "wireguard" || p.PPPUser != "" {
+		t.Fatalf("peer = %+v", p)
+	}
+}

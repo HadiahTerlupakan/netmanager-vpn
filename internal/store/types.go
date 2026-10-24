@@ -33,6 +33,8 @@ type Hub struct {
 	JoinExpiresAt time.Time
 	LastSeenAt    *time.Time
 	CreatedAt     time.Time
+	IPsecPSK      string   // sealed; empty until L2TP is enabled
+	Protocols     []string // protocols the hub serves; never empty on read
 }
 
 // Router is a customer router. ReleasedAt is set once it is soft-deleted.
@@ -46,6 +48,10 @@ type Router struct {
 	Status     string
 	CreatedAt  time.Time
 	ReleasedAt *time.Time
+
+	Protocol    string
+	PPPUser     string
+	PPPPassword string // sealed
 }
 
 // RouterHub links a router to one of its hubs; lower Priority is preferred.
@@ -85,6 +91,7 @@ type HubConfig struct {
 	APIToken      string
 	PrivateKeyUp  string // sealed
 	PrivateKeyNM  string // sealed
+	IPsecPSK      string // sealed
 }
 
 // Peer is a router peer registered on a hub.
@@ -92,4 +99,8 @@ type Peer struct {
 	PublicKey string
 	Address   netip.Addr
 	CreatedAt time.Time
+
+	Protocol    string
+	PPPUser     string
+	PPPPassword string // sealed
 }
