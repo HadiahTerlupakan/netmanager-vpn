@@ -471,3 +471,63 @@ func TestStuckPushDoesNotBlockOtherRouter(t *testing.T) {
 	}
 	<-doneA
 }
+
+// A hub list validated against the protocol read before a concurrent switch
+// would put an L2TP router on a WireGuard-only hub. SetRouterHubs waits for
+// the router's lock and validates what the router has once it holds it.
+func TestSetRouterHubsValidatesUnderRouterLock(t *testing.T) {
+	f, rec, hubs := l2tpFixture(t, 2)
+	ctx := context.Background()
+	if err := f.st.UpdateHubProtocols(hubs[1].ID, []string{"wireguard"}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upserts := len(rec.upserts)
+	unlock := f.core.routerMu.lock(v.ID)
+	done := make(chan error, 1)
+	go func() { done <- f.core.SetRouterHubs(ctx, v.ID, []string{hubs[0].ID, hubs[1].ID}) }()
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("SetRouterHubs ran while a switch held the router: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The switch that holds the lock writes the new protocol.
+	sealed, err := f.box.Seal("passpasspasspasspasspass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetRouterProtocol(v.ID, "l2tp", "nmvpn-0a", sealed); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-done; !errors.Is(err, ErrValidation) {
+		t.Fatalf("WireGuard-only hub accepted for an L2TP router: %v", err)
+	}
+	got, _ := f.core.GetRouter(v.ID)
+	if len(got.Hubs) != 1 || len(rec.upserts) != upserts {
+		t.Fatalf("hubs %+v, upserts %d -> %d", got.Hubs, upserts, len(rec.upserts))
+	}
+}
+
+// The pushes SetRouterHubs makes for new hubs take no second lock, so it
+// completes rather than deadlocking on its own.
+func TestSetRouterHubsPushesNewHub(t *testing.T) {
+	f, rec, hubs := routerFixture(t, 2)
+	ctx := context.Background()
+	v, err := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.core.SetRouterHubs(ctx, v.ID, []string{hubs[0].ID, hubs[1].ID}); err != nil {
+		t.Fatal(err)
+	}
+	last := rec.upserts[len(rec.upserts)-1]
+	got, _ := f.core.GetRouter(v.ID)
+	if last.hubID != hubs[1].ID || len(got.Hubs) != 2 || got.Hubs[1].SyncState != store.SyncStateSynced {
+		t.Fatalf("last upsert %+v, hubs %+v", last, got.Hubs)
+	}
+}

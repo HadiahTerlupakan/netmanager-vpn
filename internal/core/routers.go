@@ -149,8 +149,21 @@ func (c *Core) validateHubIDs(ids []string, protocol string) ([]store.Hub, error
 	return hubs, nil
 }
 
-// SetRouterHubs replaces the router's ordered hub list.
+// SetRouterHubs replaces the router's ordered hub list. It holds the
+// router's lock throughout, so the hubs are validated against the protocol
+// the router has when the list is written, not one a concurrent switch has
+// since replaced; the pushes therefore go through pushIfLocked.
 func (c *Core) SetRouterHubs(ctx context.Context, id string, hubIDs []string) error {
+	unlock := c.routerMu.lock(id)
+	err := c.setRouterHubsLocked(ctx, id, hubIDs)
+	unlock()
+	if err != nil {
+		return err
+	}
+	return c.applyCore()
+}
+
+func (c *Core) setRouterHubsLocked(ctx context.Context, id string, hubIDs []string) error {
 	rt, err := c.st.GetRouter(id)
 	if err != nil {
 		return err
@@ -180,10 +193,10 @@ func (c *Core) SetRouterHubs(ctx context.Context, id string, hubIDs []string) er
 	}
 	for _, h := range hubs {
 		if !had[h.ID] {
-			c.pushPeer(ctx, rt, h)
+			c.pushIfLocked(ctx, rt.ID, h, store.SyncStatePending)
 		}
 	}
-	return c.applyCore()
+	return nil
 }
 
 // dropPeer removes the router from a hub. A failure is only logged: the prune
