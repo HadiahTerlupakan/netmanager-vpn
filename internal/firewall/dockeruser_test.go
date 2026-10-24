@@ -44,7 +44,10 @@ func TestDockerUserAcceptsInsertedOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := []string{"-i wg-nm -o wg-up -j ACCEPT", "-i wg-up -o wg-nm -j ACCEPT"}
+	want := []string{
+		"-i wg-nm -o wg-up -j ACCEPT", "-i wg-up -o wg-nm -j ACCEPT",
+		"-i ppp+ -o wg-up -j ACCEPT", "-i wg-up -o ppp+ -j ACCEPT",
+	}
 	if !slices.Equal(ipt.rules, want) {
 		t.Fatalf("rules = %v", ipt.rules)
 	}
@@ -59,7 +62,7 @@ func TestDockerUserAcceptsInsertedOnce(t *testing.T) {
 			inserts++
 		}
 	}
-	if inserts != 2 {
+	if inserts != 4 {
 		t.Fatalf("second pass inserted again: %v", ipt.calls)
 	}
 }

@@ -14,12 +14,22 @@ flush table inet netmanager_vpn
 table inet netmanager_vpn {
 `
 
+// The hub's anti-spoof rule sits in prerouting because kernel 5.15 rejects fib
+// in the input and forward hooks ("Not supported") and accepts it only here;
+// prerouting also covers packets to the hub and forwarded ones alike. L2TP is
+// legitimate only inside IPsec, so plain UDP 1701 is dropped.
+//
 // Chains use policy accept because they share hooks with other software's
 // tables; we only drop what we own. No hub rule tracks connections: the hub
 // keeps no state, so replies are matched by port. A bare SYN from wg-nm is
 // dropped first because the source port alone would let a router open
 // connections.
 const (
+	hubPrerouting = `	chain prerouting {
+		type filter hook prerouting priority -150; policy accept;
+		iifname "ppp*" fib saddr . iif oif missing drop
+	}
+`
 	hubForward = `	chain forward {
 		type filter hook forward priority 0; policy accept;
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
@@ -30,6 +40,14 @@ const (
 		iifname "wg-nm" drop
 		iifname "wg-up" oifname "wg-nm" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
 		iifname "wg-up" oifname "wg-nm" drop
+		iifname "ppp*" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "ppp*" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "ppp*" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
+		iifname "ppp*" tcp flags & (syn | ack) == syn drop
+		iifname "ppp*" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
+		iifname "ppp*" drop
+		iifname "wg-up" oifname "ppp*" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
+		iifname "wg-up" oifname "ppp*" drop
 	}
 `
 	hubInput = `	chain input {
@@ -38,6 +56,9 @@ const (
 		tcp dport 7480 drop
 		iifname "wg-nm" icmp type echo-request accept
 		iifname "wg-nm" drop
+		udp dport 1701 meta ipsec missing drop
+		iifname "ppp*" icmp type echo-request accept
+		iifname "ppp*" drop
 	}
 `
 	coreInput = `	chain input {
@@ -62,10 +83,10 @@ const (
 	postamble = "}\n"
 )
 
-// RenderHub returns the hub ruleset: wg-nm traffic is confined to the
+// RenderHub returns the hub ruleset: wg-nm and ppp* traffic is confined to the
 // management flows and the control port is open only to the core.
 func RenderHub() string {
-	return preamble + hubForward + hubInput + postamble
+	return preamble + hubPrerouting + hubForward + hubInput + postamble
 }
 
 // RenderCore returns the core ruleset: the control port answers only the

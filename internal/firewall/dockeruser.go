@@ -22,6 +22,8 @@ var (
 	HubDockerAccepts = [][]string{
 		{"-i", "wg-nm", "-o", "wg-up", "-j", "ACCEPT"},
 		{"-i", "wg-up", "-o", "wg-nm", "-j", "ACCEPT"},
+		{"-i", "ppp+", "-o", "wg-up", "-j", "ACCEPT"},
+		{"-i", "wg-up", "-o", "ppp+", "-j", "ACCEPT"},
 	}
 	// The core forwards wg-core to wg-core: an admin device reaching a router
 	// through radpro.

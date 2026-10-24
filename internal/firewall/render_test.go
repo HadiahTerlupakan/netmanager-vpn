@@ -78,3 +78,61 @@ func TestHubPassesEchoReplyToAdmins(t *testing.T) {
 		t.Fatalf("echo-reply to admins must be accepted before the wg-nm drop (reply=%d drop=%d)", reply, drop)
 	}
 }
+
+func chainBody(t *testing.T, rs, name string) string {
+	t.Helper()
+	start := strings.Index(rs, "chain "+name+" {")
+	if start < 0 {
+		t.Fatalf("no chain %s", name)
+	}
+	end := strings.Index(rs[start:], "\n\t}\n")
+	return rs[start : start+end]
+}
+
+// Routers arriving over L2TP on ppp* are confined exactly like wg-nm: every
+// wg-nm rule has a ppp* twin in the same order.
+func TestHubRulesetTreatsPPPLikeWGNM(t *testing.T) {
+	rs := RenderHub()
+	var twins []string
+	for _, line := range strings.Split(chainBody(t, rs, "forward"), "\n") {
+		if l := strings.TrimSpace(line); strings.Contains(l, `"wg-nm"`) {
+			twins = append(twins, strings.ReplaceAll(l, `"wg-nm"`, `"ppp*"`))
+		}
+	}
+	if len(twins) == 0 {
+		t.Fatal("no wg-nm rules in forward")
+	}
+	last := -1
+	for _, twin := range twins {
+		i := strings.Index(rs, twin)
+		if i < 0 || i < last {
+			t.Fatalf("ppp twin missing or out of order: %q", twin)
+		}
+		last = i
+	}
+	input := chainBody(t, rs, "input")
+	for _, want := range []string{
+		`udp dport 1701 meta ipsec missing drop`,
+		`iifname "ppp*" icmp type echo-request accept`,
+		`iifname "ppp*" drop`,
+	} {
+		if !strings.Contains(input, want) {
+			t.Errorf("input chain lacks %q", want)
+		}
+	}
+}
+
+// Kernel 5.15 (radpro) rejects fib in the input and forward hooks and accepts
+// it only in prerouting, which sees both packets to the hub and forwarded ones.
+func TestHubAntiSpoofLivesOnlyInPrerouting(t *testing.T) {
+	rs := RenderHub()
+	const fib = `iifname "ppp*" fib saddr . iif oif missing drop`
+	if !strings.Contains(chainBody(t, rs, "prerouting"), fib) {
+		t.Error("prerouting chain lacks the fib anti-spoof rule")
+	}
+	for _, c := range []string{"input", "forward"} {
+		if strings.Contains(chainBody(t, rs, c), "fib ") {
+			t.Errorf("%s chain must not use fib", c)
+		}
+	}
+}
