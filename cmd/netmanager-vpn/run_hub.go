@@ -25,8 +25,10 @@ const (
 	maxBundleBytes    = 16 << 10
 	reconcileRetry    = 10 * time.Second
 	reconcileInterval = time.Minute
-	// pppDir holds the daemons' files, PSK and PPP passwords among them. It is
-	// on tmpfs: every start rewrites them from the store.
+	// pppDir holds the daemons' files, PSK and PPP passwords among them. The
+	// installer mounts a tmpfs on /run/netmanager-vpn so they never reach the
+	// host's disk; every start rewrites them from the store. A container
+	// started without that mount keeps them on its overlay, which is on disk.
 	pppDir = "/run/netmanager-vpn/ppp"
 )
 
@@ -47,7 +49,7 @@ func openHub(cfg config) (*secret.Box, *store.Store, error) {
 // end of every session, which tells its sessions from other PPP links.
 func pppOptions(gw netip.Addr) (hub.Options, *ppp.Supervisor) {
 	if !ppp.HostSupported("/") {
-		slog.Info("hub serves WireGuard only: /dev/ppp or the l2tp_ppp module is missing")
+		slog.Info("hub serves WireGuard only: /dev/ppp or one of the l2tp_ppp, esp4, xfrm_user modules is missing")
 		return hub.Options{}, nil
 	}
 	slog.Info("hub serves WireGuard and L2TP/IPsec")

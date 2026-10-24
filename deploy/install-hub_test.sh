@@ -163,6 +163,11 @@ if ! grep "docker run -d" "$tmp/calls" | tail -1 | grep -q -- "--device /dev/ppp
   fail=1
 fi
 
+if ! grep "docker run -d" "$tmp/calls" | tail -1 | grep -q -- "--tmpfs /run/netmanager-vpn:mode=0700"; then
+  echo "FAIL: the hub's secrets directory is not on tmpfs: $(cat "$tmp/calls")"
+  fail=1
+fi
+
 # Upgrade starts the hub through the same path, so it gets the same checks.
 mkdir -p "$host/var/lib/netmanager-vpn" "$host/etc/netmanager-vpn"
 : >"$host/var/lib/netmanager-vpn/state.db"
@@ -248,6 +253,38 @@ new_host
 out=$(run_install bundle)
 if grep -q "^ufw\|^firewall-cmd" "$tmp/calls"; then
   echo "FAIL: firewall touched although none is active"
+  fail=1
+fi
+
+# accel-ppp's CLI port must be free on a host that serves L2TP, and is
+# neither checked without /dev/ppp nor opened in the firewall.
+new_host
+echo "LISTEN 0 4096 127.0.0.1:2001 0.0.0.0:* users:((\"other\",pid=7,fd=3))" >"$tmp/ss_tcp"
+out=$(run_install bundle)
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "FAIL: port 2001 refused on a host without /dev/ppp (status $status): $out"
+  fail=1
+fi
+new_host
+touch "$host/dev/ppp"
+echo "LISTEN 0 4096 127.0.0.1:2001 0.0.0.0:* users:((\"other\",pid=7,fd=3))" >"$tmp/ss_tcp"
+out=$(run_install bundle)
+status=$?
+if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "Port 127.0.0.1:2001/tcp (CLI accel-ppp untuk L2TP) sudah dipakai" ||
+  ! printf '%s' "$out" | grep -q other || grep -q "docker run -d" "$tmp/calls"; then
+  echo "FAIL: accel-ppp CLI port held by a socket not refused (status $status): $out"
+  fail=1
+fi
+new_host
+touch "$host/dev/ppp"
+echo "-A DOCKER -p tcp -m tcp --dport 2001 -j DNAT --to-destination 172.18.0.2:2001" >"$tmp/nat"
+printf '#!/bin/sh\n[ "$1" = status ] && echo "Status: active"\necho "ufw $*" >>"%s/calls"\n' "$tmp" >"$tmp/bin/ufw"
+chmod +x "$tmp/bin/ufw"
+out=$(run_install bundle)
+status=$?
+if [ "$status" -ne 0 ] || grep -q "^ufw allow 2001" "$tmp/calls"; then
+  echo "FAIL: accel-ppp CLI port refused for a DNAT rule or opened in the firewall (status $status): $out"
   fail=1
 fi
 

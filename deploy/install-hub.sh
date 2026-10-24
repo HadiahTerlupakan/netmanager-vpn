@@ -20,6 +20,9 @@ PPP_DEVICE=$ROOT/dev/ppp
 # cannot load kernel modules.
 L2TP_MODULES="ppp_generic l2tp_ppp l2tp_netlink esp4 xfrm_user af_key nft_fib_inet nft_xfrm"
 CONTAINER=netmanager-vpn-hub
+# accel-ppp's CLI (internal/ppp/cli.go). It binds loopback only, so it is
+# checked but never opened in the firewall.
+ACCEL_CLI_PORT=2001/tcp
 MIN_KERNEL_MAJOR=5
 MIN_KERNEL_MINOR=6
 NOT_INSTALLED="Hub belum terpasang di VPS ini ($ENV_FILE dan $STATE_DB tidak ada); pakai perintah instal dengan bundle join, bukan upgrade."
@@ -72,17 +75,23 @@ load_l2tp_modules() {
   for m in $loaded; do echo "$m"; done >"$MODULES_CONF"
 }
 
+# Prints the socket listening on a port, or nothing when there is none.
+socket_holder() {
+  num=${1%/*}
+  case ${1#*/} in
+    udp) flag=-Hlnu ;;
+    *) flag=-Hlnt ;;
+  esac
+  ss "$flag" 2>/dev/null | awk -v p=":$num" 'substr($4, length($4) - length(p) + 1) == p' | head -n 1
+}
+
 # Prints what holds a port, or nothing when it is free. Docker's published
 # ports (Traefik on 443, say) are DNAT rules, not sockets, so the NAT table is
 # read as well.
 port_holder() {
   num=${1%/*}
   proto=${1#*/}
-  case $proto in
-    udp) flag=-Hlnu ;;
-    *) flag=-Hlnt ;;
-  esac
-  ss "$flag" 2>/dev/null | awk -v p=":$num" 'substr($4, length($4) - length(p) + 1) == p' | head -n 1
+  socket_holder "$1"
   iptables-save -t nat 2>/dev/null | awk -v proto="$proto" -v num="$num" '
     function covers(spec,   n, i, r, lo, hi) {
       n = split(spec, items, ",")
@@ -119,6 +128,11 @@ first_conflict() {
     echo "Port $port sudah dipakai: $holder"
     return 0
   done
+  # Only a hub that can serve L2TP starts accel-ppp. Its CLI binds
+  # 127.0.0.1, which no DNAT rule reaches, so only sockets count.
+  [ -e "$PPP_DEVICE" ] || return 0
+  holder=$(socket_holder "$ACCEL_CLI_PORT")
+  [ -z "$holder" ] || echo "Port 127.0.0.1:$ACCEL_CLI_PORT (CLI accel-ppp untuk L2TP) sudah dipakai: $holder"
 }
 
 open_firewall() {
@@ -186,9 +200,11 @@ start_hub() {
   open_firewall
   device=""
   [ ! -e "$PPP_DEVICE" ] || device="--device /dev/ppp"
+  # The tmpfs keeps the IPsec PSK and PPP passwords the hub writes for its
+  # daemons off the host's disk.
   # shellcheck disable=SC2086 # $device is empty or two words
   docker run -d --name "$CONTAINER" --restart unless-stopped \
-    --network host --cap-add NET_ADMIN $device \
+    --network host --cap-add NET_ADMIN $device --tmpfs /run/netmanager-vpn:mode=0700 \
     --env-file "$ENV_FILE" -v "$STATE_DIR:$STATE_DIR" \
     "$NMVPN_IMAGE" -mode hub
 }
