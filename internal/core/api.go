@@ -31,6 +31,9 @@ func (c *Core) Handler(token string) http.Handler {
 	mux.HandleFunc("POST /v1/routers/{id}/claim", c.claimRouter)
 	mux.HandleFunc("DELETE /v1/routers/{id}", c.deleteRouter)
 	mux.HandleFunc("GET /v1/routers/{id}/routeros", c.routerScript)
+	mux.HandleFunc("POST /v1/routers/{id}/protocol-script", c.protocolScript)
+	mux.HandleFunc("POST /v1/routers/{id}/protocol", c.setRouterProtocol)
+	mux.HandleFunc("GET /v1/routers/{id}/first-server", c.firstServer)
 	mux.HandleFunc("GET /v1/admin-peers", c.listAdminPeers)
 	mux.HandleFunc("POST /v1/admin-peers", c.createAdminPeer)
 	mux.HandleFunc("DELETE /v1/admin-peers/{id}", c.deleteAdminPeer)
@@ -137,9 +140,7 @@ func (c *Core) createHub(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	view := HubView{ID: h.ID, Name: h.Name, PublicHost: h.PublicHost, ListenPort: h.ListenPort,
-		PublicKey: h.PublicKey, Status: h.Status, LastSeenAt: h.LastSeenAt}
-	writeJSON(w, http.StatusOK, map[string]any{"hub": view, "installCommand": cmd})
+	writeJSON(w, http.StatusOK, map[string]any{"hub": hubView(h, 0), "installCommand": cmd})
 }
 
 func (c *Core) reissueHub(w http.ResponseWriter, r *http.Request) {

@@ -77,7 +77,7 @@ func TestOversizedBodyIs400(t *testing.T) {
 func TestDeleteHubInUseIs409(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
 	h := f.core.Handler(testToken)
-	if _, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID}); err != nil {
+	if _, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID}, ""); err != nil {
 		t.Fatal(err)
 	}
 	rec := call(t, h, "DELETE", "/v1/hubs/"+hubs[0].ID, "", true)
@@ -119,7 +119,7 @@ func TestCreateHubReturnsViewAndCommand(t *testing.T) {
 func TestRouterOSEndpointIsPlainText(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
 	h := f.core.Handler(testToken)
-	rv, err := f.core.CreateRouter(t.Context(), "kantor", []string{hubs[0].ID})
+	rv, err := f.core.CreateRouter(t.Context(), "kantor", []string{hubs[0].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestAdminConfigEndpointIsPlainText(t *testing.T) {
 func TestAPIJSONIsCamelCase(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
 	h := f.core.Handler(testToken)
-	rv, err := f.core.CreateRouter(t.Context(), "kantor", []string{hubs[0].ID})
+	rv, err := f.core.CreateRouter(t.Context(), "kantor", []string{hubs[0].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestHealthzFailsWhenReconcileStale(t *testing.T) {
 
 func TestRouterScriptOrdersServersByPriority(t *testing.T) {
 	f, _, hubs := routerFixture(t, 2)
-	rv, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[1].ID, hubs[0].ID})
+	rv, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[1].ID, hubs[0].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestRouterScriptOrdersServersByPriority(t *testing.T) {
 
 func TestRouterScriptUnknownPart(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
-	rv, _ := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID})
+	rv, _ := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID}, "")
 	if _, err := f.core.RouterScript(rv.ID, "other"); !errors.Is(err, ErrValidation) {
 		t.Fatalf("err %v", err)
 	}
@@ -248,7 +248,7 @@ func TestRouterScriptUnknownPart(t *testing.T) {
 
 func TestRouterScriptSwitchPart(t *testing.T) {
 	f, _, hubs := routerFixture(t, 2)
-	rv, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID, hubs[1].ID})
+	rv, err := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID, hubs[1].ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestRouterScriptSwitchPart(t *testing.T) {
 
 func TestRouterScriptWithoutHubsIsValidationError(t *testing.T) {
 	f, _, hubs := routerFixture(t, 1)
-	rv, _ := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID})
+	rv, _ := f.core.CreateRouter(t.Context(), "r", []string{hubs[0].ID}, "")
 	if err := f.st.SetRouterHubs(rv.ID, nil); err != nil {
 		t.Fatal(err)
 	}

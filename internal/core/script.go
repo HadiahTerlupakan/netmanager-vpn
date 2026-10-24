@@ -2,9 +2,9 @@ package core
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 )
 
 // RouterScript renders the RouterOS script for a router. part is "full" for
@@ -36,22 +36,41 @@ func (c *Core) routerInput(id string) (routeros.Input, error) {
 	if err != nil {
 		return routeros.Input{}, err
 	}
-	priv, err := c.box.Open(rt.PrivateKey)
+	return c.routerInputFor(rt, routerProtocol(rt))
+}
+
+// routerInputFor builds the script input for protocol, which need not be the
+// router's current one: the operator pastes the next protocol's script first.
+func (c *Core) routerInputFor(rt store.Router, protocol string) (routeros.Input, error) {
+	in := routeros.Input{Label: rt.Label, Address: rt.Address, Protocol: protocol}
+	var err error
+	if protocol == routeros.ProtocolL2TP {
+		in.PPPUser = rt.PPPUser
+		in.PPPPassword, err = c.openIfSet(rt.PPPPassword)
+	} else {
+		in.PrivateKey, err = c.box.Open(rt.PrivateKey)
+	}
 	if err != nil {
 		return routeros.Input{}, err
 	}
-	links, err := c.st.ListRouterHubs(id)
+	hubs, err := c.routerHubs(rt.ID)
 	if err != nil {
 		return routeros.Input{}, err
 	}
-	sort.SliceStable(links, func(i, j int) bool { return links[i].Priority < links[j].Priority })
-	in := routeros.Input{Label: rt.Label, Address: rt.Address, PrivateKey: priv}
-	for _, l := range links {
-		h, err := c.st.GetHub(l.HubID)
+	for _, h := range hubs {
+		s, err := c.server(h, protocol)
 		if err != nil {
 			return routeros.Input{}, err
 		}
-		in.Servers = append(in.Servers, routeros.Server{Host: h.PublicHost, Port: h.ListenPort, PublicKey: h.PublicKey})
+		in.Servers = append(in.Servers, s)
 	}
 	return in, nil
+}
+
+// openIfSet leaves an absent secret empty, for Validate to report.
+func (c *Core) openIfSet(sealed string) (string, error) {
+	if sealed == "" {
+		return "", nil
+	}
+	return c.box.Open(sealed)
 }

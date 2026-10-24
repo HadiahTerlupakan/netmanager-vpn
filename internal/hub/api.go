@@ -18,19 +18,24 @@ import (
 
 const maxBodyBytes = 4 << 10
 
-type putPeerRequest struct {
+// PutPeerRequest is the body of PUT /v1/peers/{pub}. It and the other API
+// types are exported because the core's client contract test decodes into
+// them.
+type PutPeerRequest struct {
 	Address     string `json:"address"`
 	Protocol    string `json:"protocol"`
 	PPPUsername string `json:"pppUsername"`
 	PPPPassword string `json:"pppPassword"`
 }
 
-type putIPsecRequest struct {
+// PutIPsecRequest is the body of PUT /v1/ipsec.
+type PutIPsecRequest struct {
 	PSK     string `json:"psk"`
 	LocalID string `json:"localId"`
 }
 
-type infoResponse struct {
+// InfoResponse is the body GET /v1/info answers with.
+type InfoResponse struct {
 	Protocols []string `json:"protocols"`
 }
 
@@ -79,7 +84,7 @@ func (s *Service) putPeer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var body putPeerRequest
+	var body PutPeerRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
@@ -121,7 +126,7 @@ func validLogin(p PeerSpec) bool {
 }
 
 func (s *Service) putIPsec(w http.ResponseWriter, r *http.Request) {
-	var body putIPsecRequest
+	var body PutIPsecRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
@@ -144,7 +149,7 @@ func (s *Service) info(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(infoResponse{Protocols: protocols})
+	_ = json.NewEncoder(w).Encode(InfoResponse{Protocols: protocols})
 }
 
 func (s *Service) deletePeer(w http.ResponseWriter, r *http.Request) {

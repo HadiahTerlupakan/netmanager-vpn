@@ -21,7 +21,7 @@ func (c *Core) GetRouter(id string) (RouterView, error) {
 		return RouterView{}, err
 	}
 	v := RouterView{ID: rt.ID, Label: rt.Label, Ref: rt.Ref, Address: rt.Address.String(), Status: rt.Status,
-		Hubs: []RouterHub{}, Events: []RouterEvent{}}
+		Protocol: routerProtocol(rt), Hubs: []RouterHub{}, Events: []RouterEvent{}}
 	for _, l := range links {
 		name := ""
 		if h, err := c.st.GetHub(l.HubID); err == nil {

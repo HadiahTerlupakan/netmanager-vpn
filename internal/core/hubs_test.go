@@ -23,9 +23,13 @@ var testNow = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 
 type fakeHubs struct{}
 
-func (fakeHubs) UpsertPeer(context.Context, store.Hub, string, netip.Addr) error { return nil }
-func (fakeHubs) DeletePeer(context.Context, store.Hub, string) error             { return nil }
-func (fakeHubs) Peers(context.Context, store.Hub) ([]HubPeerStatus, error)       { return nil, nil }
+func (fakeHubs) UpsertPeer(context.Context, store.Hub, PeerSpec) error     { return nil }
+func (fakeHubs) DeletePeer(context.Context, store.Hub, string) error       { return nil }
+func (fakeHubs) Peers(context.Context, store.Hub) ([]HubPeerStatus, error) { return nil, nil }
+func (fakeHubs) SetIPsecPSK(context.Context, store.Hub, string) error      { return nil }
+func (fakeHubs) Info(context.Context, store.Hub) (HubInfo, error) {
+	return HubInfo{Protocols: []string{"wireguard"}}, nil
+}
 
 type fixture struct {
 	core *Core

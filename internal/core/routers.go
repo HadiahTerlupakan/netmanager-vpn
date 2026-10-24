@@ -10,6 +10,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/ipam"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 )
 
@@ -26,6 +27,7 @@ type RouterView struct {
 	Ref             string        `json:"ref"`
 	Address         string        `json:"address"`
 	Status          string        `json:"status"`
+	Protocol        string        `json:"protocol"`
 	Hubs            []RouterHub   `json:"hubs"`
 	ActiveHubID     *string       `json:"activeHubId"`
 	LastHandshakeAt *time.Time    `json:"lastHandshakeAt"`
@@ -49,18 +51,30 @@ type RouterEvent struct {
 
 // CreateRouter registers one keypair and /32 on every listed hub, so the
 // router can switch hubs without the core handing it new credentials. A hub
-// that cannot be reached stays sync_state=pending for SyncPending.
-func (c *Core) CreateRouter(ctx context.Context, label string, hubIDs []string) (RouterView, error) {
+// that cannot be reached stays sync_state=pending for SyncPending. An empty
+// protocol means WireGuard.
+func (c *Core) CreateRouter(ctx context.Context, label string, hubIDs []string, protocol string) (RouterView, error) {
 	if label == "" || len(label) > maxLabelLen {
 		return RouterView{}, fmt.Errorf("%w: label must be 1-%d characters", ErrValidation, maxLabelLen)
 	}
-	hubs, err := c.validateHubIDs(hubIDs)
+	protocol, err := normalizeProtocol(protocol)
 	if err != nil {
 		return RouterView{}, err
 	}
-	rt, err := c.storeNewRouter(label)
+	hubs, err := c.validateHubIDs(hubIDs, protocol)
 	if err != nil {
 		return RouterView{}, err
+	}
+	rt, err := c.storeNewRouter(label, protocol)
+	if err != nil {
+		return RouterView{}, err
+	}
+	if protocol == routeros.ProtocolL2TP {
+		withLogin, err := c.ensurePPP(rt)
+		if err != nil {
+			return RouterView{}, errors.Join(err, c.st.DeleteRouter(rt.ID))
+		}
+		rt = withLogin
 	}
 	if err := c.st.SetRouterHubs(rt.ID, hubIDs); err != nil {
 		return RouterView{}, errors.Join(err, c.st.DeleteRouter(rt.ID))
@@ -76,7 +90,7 @@ func (c *Core) CreateRouter(ctx context.Context, label string, hubIDs []string) 
 
 // storeNewRouter retries once on a conflict: two creations can pick the same
 // free address between TakenAddresses and the insert.
-func (c *Core) storeNewRouter(label string) (store.Router, error) {
+func (c *Core) storeNewRouter(label, protocol string) (store.Router, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return store.Router{}, err
@@ -95,7 +109,7 @@ func (c *Core) storeNewRouter(label string) (store.Router, error) {
 			return store.Router{}, fmt.Errorf("core: allocate router address: %w", err)
 		}
 		rt, err := c.st.CreateRouter(store.Router{Label: label, Address: addr,
-			PublicKey: key.PublicKey().String(), PrivateKey: sealed, Status: store.RouterStatusPending})
+			PublicKey: key.PublicKey().String(), PrivateKey: sealed, Status: store.RouterStatusPending, Protocol: protocol})
 		if errors.Is(err, store.ErrConflict) && attempt == 0 {
 			continue
 		}
@@ -103,9 +117,10 @@ func (c *Core) storeNewRouter(label string) (store.Router, error) {
 	}
 }
 
-// validateHubIDs requires at least one hub, no repeats, and every hub online:
-// a router cannot use a server that has never connected.
-func (c *Core) validateHubIDs(ids []string) ([]store.Hub, error) {
+// validateHubIDs requires at least one hub, no repeats, and every hub online
+// and serving the protocol: a router cannot use a server that has never
+// connected.
+func (c *Core) validateHubIDs(ids []string, protocol string) ([]store.Hub, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("%w: at least one hub is required", ErrValidation)
 	}
@@ -126,6 +141,9 @@ func (c *Core) validateHubIDs(ids []string) ([]store.Hub, error) {
 		if h.Status != store.HubStatusOnline {
 			return nil, fmt.Errorf("%w: hub %s is %s, not online", ErrValidation, h.Name, h.Status)
 		}
+		if err := requireSupport(h, protocol); err != nil {
+			return nil, err
+		}
 		hubs = append(hubs, h)
 	}
 	return hubs, nil
@@ -137,7 +155,7 @@ func (c *Core) SetRouterHubs(ctx context.Context, id string, hubIDs []string) er
 	if err != nil {
 		return err
 	}
-	hubs, err := c.validateHubIDs(hubIDs)
+	hubs, err := c.validateHubIDs(hubIDs, routerProtocol(rt))
 	if err != nil {
 		return err
 	}

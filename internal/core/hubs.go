@@ -39,6 +39,13 @@ type HubView struct {
 	Status      string     `json:"status"`
 	RouterCount int        `json:"routerCount"`
 	LastSeenAt  *time.Time `json:"lastSeenAt"`
+	Protocols   []string   `json:"protocols"`
+}
+
+func hubView(h store.Hub, routerCount int) HubView {
+	return HubView{ID: h.ID, Name: h.Name, PublicHost: h.PublicHost, ListenPort: h.ListenPort,
+		PublicKey: h.PublicKey, Status: h.Status, RouterCount: routerCount, LastSeenAt: h.LastSeenAt,
+		Protocols: hubProtocols(h)}
 }
 
 // CreateHub registers a hub and returns the command the operator runs on it.
@@ -61,10 +68,15 @@ func (c *Core) CreateHub(name, publicHost string, port int) (store.Hub, string, 
 	if err != nil {
 		return store.Hub{}, "", err
 	}
+	psk, err := c.sealedRandom(pskBytes)
+	if err != nil {
+		return store.Hub{}, "", err
+	}
 	hub, err := c.st.CreateHub(store.Hub{
 		Name: name, PublicHost: publicHost, ListenPort: port, BackhaulAddr: addr,
 		PublicKey: cred.public, PrivateKey: cred.sealedPrivate, APIToken: cred.sealedToken,
 		Status: store.HubStatusPendingInstall, JoinExpiresAt: c.cfg.Now().Add(joinValidity),
+		IPsecPSK: psk,
 	})
 	if err != nil {
 		return store.Hub{}, "", err
@@ -135,8 +147,7 @@ func (c *Core) ListHubs() ([]HubView, error) {
 	}
 	out := make([]HubView, 0, len(hubs))
 	for _, h := range hubs {
-		out = append(out, HubView{ID: h.ID, Name: h.Name, PublicHost: h.PublicHost,
-			ListenPort: h.ListenPort, PublicKey: h.PublicKey, Status: h.Status, RouterCount: counts[h.ID], LastSeenAt: h.LastSeenAt})
+		out = append(out, hubView(h, counts[h.ID]))
 	}
 	return out, nil
 }
