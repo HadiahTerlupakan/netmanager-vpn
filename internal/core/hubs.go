@@ -252,7 +252,7 @@ func (c *Core) finishJoin(hub store.Hub, cred hubCredentials) (string, error) {
 	b := joinbundle.Bundle{CoreEndpoint: c.cfg.CoreEndpoint, CorePublicKey: corePriv.PublicKey().String(),
 		BackhaulAddr: hub.BackhaulAddr.String(), ListenPort: hub.ListenPort, PrivateKey: cred.private, APIToken: cred.token,
 		ExpiresAt: hub.JoinExpiresAt}
-	return c.hubCommand(b.Encode()), nil
+	return c.hubCommand(hub, b.Encode()), nil
 }
 
 func validateHub(name, host string, port int) error {

@@ -75,7 +75,7 @@ func peerByKey(cfg wgdevice.Config, pub string) (wgdevice.PeerConfig, bool) {
 
 func bundleOf(t *testing.T, cmd string) joinbundle.Bundle {
 	t.Helper()
-	prefix := "curl -fsSL https://example.test/install-hub.sh | $(command -v sudo) env NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 sh -s -- "
+	prefix := "curl -fsSL https://example.test/install-hub.sh | $(command -v sudo) env NMVPN_IMAGE=ghcr.io/example/netmanager-vpn:abc123def456-1760000000 NMVPN_PORTS=\"51821/udp 500/udp 4500/udp\" sh -s -- "
 	enc, ok := strings.CutPrefix(cmd, prefix)
 	if !ok {
 		t.Fatalf("unexpected install command %q", cmd)
@@ -385,6 +385,24 @@ func TestCreateHubRejectsUnusableAddresses(t *testing.T) {
 	for _, host := range []string{"::1", "2001:db8::1", "fe80::1%eth0", "0.0.0.0", "127.0.0.1", "224.0.0.1"} {
 		if _, _, err := f.core.CreateHub("x", host, 0); !errors.Is(err, ErrValidation) {
 			t.Errorf("%s: err = %v", host, err)
+		}
+	}
+}
+
+func TestHubCommandCarriesPorts(t *testing.T) {
+	f := newFixture(t)
+	hub, install, err := f.core.CreateHub("Jakarta", "hub1.example.com", 51900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgrade, err := f.core.UpgradeCommand(hub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ports = `NMVPN_PORTS="51900/udp 500/udp 4500/udp" sh -s -- `
+	for name, cmd := range map[string]string{"install": install, "upgrade": upgrade} {
+		if !strings.Contains(cmd, ports) {
+			t.Errorf("%s command lacks the ports: %q", name, cmd)
 		}
 	}
 }
