@@ -12,12 +12,26 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/ipam"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 )
 
 const maxBodyBytes = 4 << 10
 
 type putPeerRequest struct {
-	Address string `json:"address"`
+	Address     string `json:"address"`
+	Protocol    string `json:"protocol"`
+	PPPUsername string `json:"pppUsername"`
+	PPPPassword string `json:"pppPassword"`
+}
+
+type putIPsecRequest struct {
+	PSK     string `json:"psk"`
+	LocalID string `json:"localId"`
+}
+
+type infoResponse struct {
+	Protocols []string `json:"protocols"`
 }
 
 // Handler serves the peer API the core calls. Every route but /healthz needs
@@ -30,6 +44,8 @@ func (s *Service) Handler(token string) http.Handler {
 	mux.HandleFunc("PUT /v1/peers/{pub}", s.putPeer)
 	mux.HandleFunc("DELETE /v1/peers/{pub}", s.deletePeer)
 	mux.HandleFunc("GET /v1/peers", s.listPeers)
+	mux.HandleFunc("PUT /v1/ipsec", s.putIPsec)
+	mux.HandleFunc("GET /v1/info", s.info)
 	return authenticate(token, mux)
 }
 
@@ -73,7 +89,16 @@ func (s *Service) putPeer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address outside the router pool", http.StatusBadRequest)
 		return
 	}
-	if err := s.UpsertPeer(pub, addr); err != nil {
+	spec := PeerSpec{PublicKey: pub, Address: addr, Protocol: body.Protocol,
+		PPPUser: body.PPPUsername, PPPPassword: body.PPPPassword}
+	if spec.Protocol == "" {
+		spec.Protocol = routeros.ProtocolWireGuard
+	}
+	if !validLogin(spec) {
+		http.Error(w, "invalid protocol or PPP login", http.StatusBadRequest)
+		return
+	}
+	if err := s.UpsertPeer(spec); err != nil {
 		if errors.Is(err, ErrAddressInUse) {
 			writeError(w, http.StatusConflict, "address_in_use")
 			return
@@ -82,6 +107,44 @@ func (s *Service) putPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validLogin: a WireGuard peer carries no PPP login, an L2TP peer needs one.
+func validLogin(p PeerSpec) bool {
+	switch p.Protocol {
+	case routeros.ProtocolWireGuard:
+		return p.PPPUser == "" && p.PPPPassword == ""
+	case routeros.ProtocolL2TP:
+		return ppp.UserRE.MatchString(p.PPPUser) && ppp.PasswordRE.MatchString(p.PPPPassword)
+	}
+	return false
+}
+
+func (s *Service) putIPsec(w http.ResponseWriter, r *http.Request) {
+	var body putIPsecRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if !ppp.PSKRE.MatchString(body.PSK) || !routeros.ValidHost(body.LocalID) {
+		http.Error(w, "invalid psk or localId", http.StatusBadRequest)
+		return
+	}
+	if err := s.SetIPsec(body.PSK, body.LocalID); err != nil {
+		internalError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) info(w http.ResponseWriter, _ *http.Request) {
+	protocols, err := s.Protocols()
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(infoResponse{Protocols: protocols})
 }
 
 func (s *Service) deletePeer(w http.ResponseWriter, r *http.Request) {

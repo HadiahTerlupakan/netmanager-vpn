@@ -618,9 +618,9 @@ func TestUpsertPeerKeepsPPPFields(t *testing.T) {
 	}
 }
 
-func TestSaveHubPSK(t *testing.T) {
+func TestSaveHubIPsec(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SaveHubPSK("sealed"); !errors.Is(err, ErrNotFound) {
+	if err := s.SaveHubIPsec("sealed", "hub.example"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("before join: %v", err)
 	}
 	cfg := HubConfig{CorePublicKey: "c", CoreEndpoint: "e:1", BackhaulAddr: netip.MustParseAddr("10.8.0.2"),
@@ -628,11 +628,20 @@ func TestSaveHubPSK(t *testing.T) {
 	if err := s.SaveHubConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveHubPSK("sealed"); err != nil {
+	if err := s.SaveHubIPsec("sealed", "hub.example"); err != nil {
 		t.Fatal(err)
 	}
-	if got := must(s.LoadHubConfig()); got.IPsecPSK != "sealed" || got.APIToken != "t" {
+	got := must(s.LoadHubConfig())
+	if got.IPsecPSK != "sealed" || got.IPsecLocalID != "hub.example" || got.APIToken != "t" {
 		t.Fatalf("config = %+v", got)
+	}
+	cfg.IPsecPSK, cfg.IPsecLocalID = got.IPsecPSK, got.IPsecLocalID
+	cfg.APIToken = "t2"
+	if err := s.SaveHubConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := must(s.LoadHubConfig()); got.IPsecLocalID != "hub.example" || got.APIToken != "t2" {
+		t.Fatalf("after save = %+v", got)
 	}
 }
 

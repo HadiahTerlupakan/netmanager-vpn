@@ -92,6 +92,7 @@ type HubConfig struct {
 	PrivateKeyUp  string // sealed
 	PrivateKeyNM  string // sealed
 	IPsecPSK      string // sealed
+	IPsecLocalID  string // the hub's public host, its IKE identity
 }
 
 // Peer is a router peer registered on a hub.

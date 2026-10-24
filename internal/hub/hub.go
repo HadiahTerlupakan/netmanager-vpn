@@ -11,6 +11,8 @@ import (
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/firewall"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/joinbundle"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/wgdevice"
@@ -32,11 +34,14 @@ const (
 var coreAllowedIPs = []string{"10.99.0.0/24", "10.99.128.0/24"}
 
 // Options override the clock, the sysctl writer and iptables; zero values use
-// the real ones.
+// the real ones. Sessions and PPP add L2TP/IPsec; left nil, as in tests and on
+// hosts without /dev/ppp, the hub serves WireGuard only.
 type Options struct {
 	Now      func() time.Time
 	Sysctl   func(key, value string) error
 	IPTables firewall.IPTables
+	Sessions ppp.Sessions
+	PPP      PPPRuntime
 }
 
 // Service owns the hub's configuration and keeps the kernel in line with it.
@@ -48,7 +53,10 @@ type Service struct {
 	box    *secret.Box
 	now    func() time.Time
 	sysctl func(string, string) error
-	mu     sync.Mutex
+	// sessions and ppp are both set or both nil.
+	sessions ppp.Sessions
+	ppp      PPPRuntime
+	mu       sync.Mutex
 }
 
 // PeerStatus is a router peer with its live counters. The JSON shape is relied
@@ -63,7 +71,11 @@ type PeerStatus struct {
 
 // New builds a Service.
 func New(dev wgdevice.Device, st *store.Store, fw firewall.Applier, box *secret.Box, opts Options) *Service {
-	s := &Service{dev: dev, st: st, fw: fw, ipt: opts.IPTables, box: box, now: opts.Now, sysctl: opts.Sysctl}
+	s := &Service{dev: dev, st: st, fw: fw, ipt: opts.IPTables, box: box, now: opts.Now, sysctl: opts.Sysctl,
+		sessions: opts.Sessions, ppp: opts.PPP}
+	if s.sessions == nil || s.ppp == nil {
+		s.sessions, s.ppp = nil, nil
+	}
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -93,9 +105,16 @@ func (s *Service) Join(b joinbundle.Bundle) error {
 	if err != nil {
 		return err
 	}
+	// A rejoin keeps the IPsec settings: the bundle does not carry them, and
+	// dropping them would stop L2TP until the core next pushes them.
+	prev, err := s.st.LoadHubConfig()
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
 	err = s.st.SaveHubConfig(store.HubConfig{
 		CorePublicKey: b.CorePublicKey, CoreEndpoint: b.CoreEndpoint, BackhaulAddr: addr, ListenPort: port,
 		APIToken: b.APIToken, PrivateKeyUp: sealed, PrivateKeyNM: sealed,
+		IPsecPSK: prev.IPsecPSK, IPsecLocalID: prev.IPsecLocalID,
 	})
 	if err != nil {
 		return err
@@ -139,7 +158,7 @@ func (s *Service) reconcile() error {
 	if err := s.sysctl(ipForwardKey, "1"); err != nil {
 		return fmt.Errorf("hub: enable forwarding: %w", err)
 	}
-	return nil
+	return s.reconcilePPP(cfg, peers)
 }
 
 func upConfig(cfg store.HubConfig, key string) wgdevice.Config {
@@ -155,12 +174,17 @@ func upConfig(cfg store.HubConfig, key string) wgdevice.Config {
 
 // nmConfig borrows the backhaul address as a /32: the Linux device requires an
 // interface address, and a host route to it cannot shadow any router subnet.
+// Only WireGuard peers belong here; an L2TP router's /32 is routed by the PPP
+// daemon over its pppN, and a wg-nm route for it would take its traffic.
 func nmConfig(cfg store.HubConfig, key string, peers []store.Peer) wgdevice.Config {
 	c := wgdevice.Config{
 		InterfaceName: ifaceNM, PrivateKey: key, ListenPort: cfg.ListenPort, MTU: nmMTU,
 		Address: netip.PrefixFrom(cfg.BackhaulAddr, 32).String(),
 	}
 	for _, p := range peers {
+		if p.Protocol != routeros.ProtocolWireGuard {
+			continue
+		}
 		c.Peers = append(c.Peers, wgdevice.PeerConfig{
 			PublicKey: p.PublicKey, AllowedIPs: []string{netip.PrefixFrom(p.Address, 32).String()},
 		})
@@ -172,9 +196,21 @@ func nmConfig(cfg store.HubConfig, key string, peers []store.Peer) wgdevice.Conf
 // kernel would give it to only one of them and black-hole the other.
 var ErrAddressInUse = errors.New("hub: address already held by another peer")
 
+// PeerSpec is a router as the core describes it. PPPPassword is plaintext and
+// is sealed before it is stored.
+type PeerSpec struct {
+	PublicKey   string
+	Address     netip.Addr
+	Protocol    string
+	PPPUser     string
+	PPPPassword string
+}
+
 // UpsertPeer records a router and applies it. The check and the write share
-// one lock so two concurrent requests cannot both claim an address.
-func (s *Service) UpsertPeer(pub string, addr netip.Addr) error {
+// one lock so two concurrent requests cannot both claim an address. A session
+// the change leaves without a login, as when the router moves to WireGuard,
+// is ended by the reconcile.
+func (s *Service) UpsertPeer(spec PeerSpec) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	peers, err := s.st.ListPeers()
@@ -182,17 +218,23 @@ func (s *Service) UpsertPeer(pub string, addr netip.Addr) error {
 		return err
 	}
 	for _, p := range peers {
-		if p.Address == addr && p.PublicKey != pub {
+		if p.Address == spec.Address && p.PublicKey != spec.PublicKey {
 			return ErrAddressInUse
 		}
 	}
-	if err := s.st.UpsertPeer(store.Peer{PublicKey: pub, Address: addr}); err != nil {
+	peer := store.Peer{PublicKey: spec.PublicKey, Address: spec.Address, Protocol: spec.Protocol, PPPUser: spec.PPPUser}
+	if spec.PPPPassword != "" {
+		if peer.PPPPassword, err = s.box.Seal(spec.PPPPassword); err != nil {
+			return err
+		}
+	}
+	if err := s.st.UpsertPeer(peer); err != nil {
 		return err
 	}
 	return s.reconcile()
 }
 
-// DeletePeer removes a router and applies the change.
+// DeletePeer removes a router and applies the change, ending its PPP session.
 func (s *Service) DeletePeer(pub string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -203,7 +245,8 @@ func (s *Service) DeletePeer(pub string) error {
 }
 
 // PeerStatuses lists stored peers with the kernel's counters; a peer the
-// kernel has not reported yet shows zeros.
+// kernel has not reported yet shows zeros. An L2TP peer with a session up is
+// stamped as handshaking now, which is what the core's hub choice reads.
 func (s *Service) PeerStatuses() ([]PeerStatus, error) {
 	peers, err := s.st.ListPeers()
 	if err != nil {
@@ -213,12 +256,22 @@ func (s *Service) PeerStatuses() ([]PeerStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	sessions, err := s.liveSessions()
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
 	byKey := make(map[string]wgdevice.PeerStatus, len(live))
 	for _, l := range live {
 		byKey[l.PublicKey] = l
 	}
 	out := make([]PeerStatus, 0, len(peers))
 	for _, p := range peers {
+		if p.Protocol != routeros.ProtocolWireGuard {
+			out = append(out, PeerStatus{PublicKey: p.PublicKey, Address: p.Address.String(),
+				LastHandshakeAt: stampIf(sessions[p.Address], now)})
+			continue
+		}
 		l := byKey[p.PublicKey]
 		out = append(out, PeerStatus{
 			PublicKey: p.PublicKey, Address: p.Address.String(),

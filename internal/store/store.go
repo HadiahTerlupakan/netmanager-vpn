@@ -126,6 +126,7 @@ var migrations = []string{
 	`ALTER TABLE peers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'wireguard';`,
 	`ALTER TABLE peers ADD COLUMN ppp_user TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE peers ADD COLUMN ppp_password TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE hub_config ADD COLUMN ipsec_local_id TEXT NOT NULL DEFAULT '';`,
 }
 
 // Open opens (creating if needed) the database at path and applies pending

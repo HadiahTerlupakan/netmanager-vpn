@@ -8,22 +8,24 @@ import (
 // SaveHubConfig writes the hub's single configuration row, replacing any prior one.
 func (s *Store) SaveHubConfig(c HubConfig) error {
 	_, err := s.db.Exec(`INSERT INTO hub_config
-		(id, core_public_key, core_endpoint, backhaul_addr, listen_port, api_token, private_key_up, private_key_nm, ipsec_psk)
-		VALUES (1,?,?,?,?,?,?,?,?)
+		(id, core_public_key, core_endpoint, backhaul_addr, listen_port, api_token, private_key_up, private_key_nm, ipsec_psk, ipsec_local_id)
+		VALUES (1,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET core_public_key = excluded.core_public_key,
 			core_endpoint = excluded.core_endpoint, backhaul_addr = excluded.backhaul_addr,
 			listen_port = excluded.listen_port,
 			api_token = excluded.api_token, private_key_up = excluded.private_key_up,
-			private_key_nm = excluded.private_key_nm, ipsec_psk = excluded.ipsec_psk`,
+			private_key_nm = excluded.private_key_nm, ipsec_psk = excluded.ipsec_psk,
+			ipsec_local_id = excluded.ipsec_local_id`,
 		c.CorePublicKey, c.CoreEndpoint, c.BackhaulAddr.String(), c.ListenPort, c.APIToken,
-		c.PrivateKeyUp, c.PrivateKeyNM, c.IPsecPSK)
+		c.PrivateKeyUp, c.PrivateKeyNM, c.IPsecPSK, c.IPsecLocalID)
 	return err
 }
 
-// SaveHubPSK stores the sealed IPsec pre-shared key on the hub's configuration
-// row, or returns ErrNotFound before the hub has joined.
-func (s *Store) SaveHubPSK(sealedPSK string) error {
-	return affected(s.db.Exec(`UPDATE hub_config SET ipsec_psk = ? WHERE id = 1`, sealedPSK))
+// SaveHubIPsec stores the sealed IPsec pre-shared key and the hub's IKE
+// identity on its configuration row, or returns ErrNotFound before the hub
+// has joined.
+func (s *Store) SaveHubIPsec(sealedPSK, localID string) error {
+	return affected(s.db.Exec(`UPDATE hub_config SET ipsec_psk = ?, ipsec_local_id = ? WHERE id = 1`, sealedPSK, localID))
 }
 
 // LoadHubConfig returns the hub's configuration, or ErrNotFound before it has joined.
@@ -31,8 +33,9 @@ func (s *Store) LoadHubConfig() (HubConfig, error) {
 	var c HubConfig
 	var addr string
 	err := s.db.QueryRow(`SELECT core_public_key, core_endpoint, backhaul_addr, listen_port, api_token,
-		private_key_up, private_key_nm, ipsec_psk FROM hub_config WHERE id = 1`).
-		Scan(&c.CorePublicKey, &c.CoreEndpoint, &addr, &c.ListenPort, &c.APIToken, &c.PrivateKeyUp, &c.PrivateKeyNM, &c.IPsecPSK)
+		private_key_up, private_key_nm, ipsec_psk, ipsec_local_id FROM hub_config WHERE id = 1`).
+		Scan(&c.CorePublicKey, &c.CoreEndpoint, &addr, &c.ListenPort, &c.APIToken, &c.PrivateKeyUp, &c.PrivateKeyNM,
+			&c.IPsecPSK, &c.IPsecLocalID)
 	if err == sql.ErrNoRows {
 		return HubConfig{}, ErrNotFound
 	}

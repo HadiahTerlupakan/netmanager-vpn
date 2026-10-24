@@ -76,7 +76,7 @@ func (in Input) Validate() error {
 		return errors.New("routeros: no servers")
 	}
 	for i, s := range in.Servers {
-		if !validHost(s.Host) {
+		if !ValidHost(s.Host) {
 			return fmt.Errorf("routeros: server %d: bad host %q", i, s.Host)
 		}
 	}
@@ -118,7 +118,9 @@ func (in Input) validateL2TP() error {
 	return nil
 }
 
-func validHost(h string) bool {
+// ValidHost reports whether h is an IPv4 address or a hostname a router can
+// dial; the hub applies the same rule to its IPsec identity.
+func ValidHost(h string) bool {
 	if ip, err := netip.ParseAddr(h); err == nil {
 		return ip.Is4()
 	}
