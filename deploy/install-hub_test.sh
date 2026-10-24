@@ -71,8 +71,11 @@ new_host() {
   printf '#!/bin/sh\n[ "$1" = l2tp_ppp ] && [ -n "${FAIL_L2TP:-}" ] && exit 1\necho "$1" >>"%s/modprobed"\nexit 0\n' "$tmp" >"$tmp/bin/modprobe"
   printf '#!/bin/sh\ncase "$1" in -Hlnu) cat "%s/ss_udp";; -Hlnt) cat "%s/ss_tcp";; esac\n' "$tmp" "$tmp" >"$tmp/bin/ss"
   printf '#!/bin/sh\ncat "%s/nat"\n' "$tmp" >"$tmp/bin/iptables-save"
+  printf '#!/bin/sh\n[ "$1" = link ] && [ -e "%s/wg-nm" ]\n' "$tmp" >"$tmp/bin/ip"
+  printf '#!/bin/sh\n[ "$1" = status ] && echo "Status: inactive"\nexit 0\n' >"$tmp/bin/ufw"
+  printf '#!/bin/sh\n[ "$1" = --state ] && echo "not running"\nexit 0\n' >"$tmp/bin/firewall-cmd"
   chmod +x "$tmp"/bin/*
-  rm -f "$tmp/modprobed"
+  rm -f "$tmp/modprobed" "$tmp/wg-nm"
 }
 
 run_install() {
@@ -165,10 +168,58 @@ mkdir -p "$host/var/lib/netmanager-vpn" "$host/etc/netmanager-vpn"
 : >"$host/var/lib/netmanager-vpn/state.db"
 : >"$host/etc/netmanager-vpn/env"
 echo "UNCONN 0 0 0.0.0.0:4500 0.0.0.0:*" >"$tmp/ss_udp"
+: >"$tmp/calls"
 out=$(run_install upgrade)
 status=$?
 if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "Port 4500/udp sudah dipakai"; then
   echo "FAIL: upgrade did not refuse a taken port (status $status): $out"
+  fail=1
+fi
+if ! grep -q "^docker start netmanager-vpn-hub" "$tmp/calls" || grep -q "^docker rm" "$tmp/calls" ||
+  grep -q "docker run -d" "$tmp/calls"; then
+  echo "FAIL: a refused upgrade must start the old container again and not remove it: $(cat "$tmp/calls")"
+  fail=1
+fi
+
+# The hub's own wg-nm socket outlives the container; it must not block an upgrade.
+echo "UNCONN 0 0 0.0.0.0:51821 0.0.0.0:*" >"$tmp/ss_udp"
+out=$(run_install upgrade)
+if ! printf '%s' "$out" | grep -q "Port 51821/udp sudah dipakai"; then
+  echo "FAIL: port 51821 must be refused without wg-nm: $out"
+  fail=1
+fi
+: >"$tmp/wg-nm"
+out=$(run_install upgrade)
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "FAIL: upgrade tripped on its own wg-nm port (status $status): $out"
+  fail=1
+fi
+rm -f "$tmp/wg-nm"
+: >"$tmp/ss_udp"
+
+for rule in "-p udp -m multiport --dports 443,500 -j DNAT" "-p udp -m udp --dport 400:600 -j DNAT"; do
+  new_host
+  echo "-A DOCKER $rule --to-destination 172.18.0.2:1" >"$tmp/nat"
+  out=$(PORTS="500/udp" run_install bundle)
+  status=$?
+  if [ "$status" -eq 0 ] || ! printf '%s' "$out" | grep -q "Port 500/udp sudah dipakai"; then
+    echo "FAIL: NAT rule '$rule' not refused (status $status): $out"
+    fail=1
+  fi
+done
+new_host
+echo "-A DOCKER -p udp -m udp --dport 5000 -j DNAT --to-destination 172.18.0.2:1" >"$tmp/nat"
+out=$(PORTS="500/udp" run_install bundle)
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "FAIL: --dport 5000 mistaken for 500 (status $status): $out"
+  fail=1
+fi
+
+out=$(env -u NMVPN_PORTS NMVPN_IMAGE=example/img:tag-1 sh "$script" upgrade 2>&1)
+if ! printf '%s' "$out" | grep -q "perintah upgrade terbaru"; then
+  echo "FAIL: upgrade without NMVPN_PORTS gives the wrong advice: $out"
   fail=1
 fi
 
@@ -188,8 +239,8 @@ printf '#!/bin/sh\ncase "$1" in --state) echo running;; *) echo "firewall-cmd $*
 chmod +x "$tmp/bin/firewall-cmd"
 out=$(run_install bundle)
 if ! grep -q "^firewall-cmd --permanent --add-port=500/udp" "$tmp/calls" ||
-  [ "$(grep -c '^firewall-cmd --reload' "$tmp/calls")" -ne 1 ]; then
-  echo "FAIL: firewalld ports not opened once and reloaded: $out"
+  ! grep -q "^firewall-cmd --add-port=500/udp" "$tmp/calls" || grep -q '^firewall-cmd --reload' "$tmp/calls"; then
+  echo "FAIL: firewalld ports not opened at runtime and permanently without a reload: $out"
   fail=1
 fi
 

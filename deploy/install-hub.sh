@@ -72,9 +72,9 @@ load_l2tp_modules() {
   for m in $loaded; do echo "$m"; done >"$MODULES_CONF"
 }
 
-# Names what holds a port, or prints nothing when it is free. Docker's
-# published ports (Traefik on 443, say) are DNAT rules, not sockets, so the
-# NAT table is read as well.
+# Prints what holds a port, or nothing when it is free. Docker's published
+# ports (Traefik on 443, say) are DNAT rules, not sockets, so the NAT table is
+# read as well.
 port_holder() {
   num=${1%/*}
   proto=${1#*/}
@@ -83,13 +83,41 @@ port_holder() {
     *) flag=-Hlnt ;;
   esac
   ss "$flag" 2>/dev/null | awk -v p=":$num" 'substr($4, length($4) - length(p) + 1) == p' | head -n 1
-  iptables-save -t nat 2>/dev/null | grep -E -- "-p $proto .*--dport $num( |\$)" | head -n 1 || true
+  iptables-save -t nat 2>/dev/null | awk -v proto="$proto" -v num="$num" '
+    function covers(spec,   n, i, r, lo, hi) {
+      n = split(spec, items, ",")
+      for (i = 1; i <= n; i++) {
+        if (split(items[i], r, ":") == 2) { lo = r[1]; hi = r[2] } else { lo = hi = items[i] }
+        if (num + 0 >= lo + 0 && num + 0 <= hi + 0) return 1
+      }
+      return 0
+    }
+    {
+      p = ""; d = ""
+      for (i = 1; i < NF; i++) {
+        if ($i == "-p") p = $(i + 1)
+        if ($i == "--dport" || $i == "--dports") d = $(i + 1)
+      }
+      if (p == proto && d != "" && covers(d)) { print; exit }
+    }'
 }
 
-check_ports() {
+# wg-nm is a kernel link in the host netns: it and its UDP socket outlive the
+# container, and ss lists that socket with no process. The hub's own
+# listenPort is the first NMVPN_PORTS entry, so a UDP socket on that port while
+# wg-nm exists is ours. Reading the port back would need `wg`, which a VPS
+# rarely has.
+is_own_wireguard() {
+  [ "$1" = "${NMVPN_PORTS%% *}" ] && [ "${1#*/}" = udp ] && ip link show wg-nm >/dev/null 2>&1
+}
+
+first_conflict() {
   for port in $NMVPN_PORTS; do
     holder=$(port_holder "$port")
-    [ -z "$holder" ] || die "Port $port sudah dipakai: $holder"
+    [ -n "$holder" ] || continue
+    is_own_wireguard "$port" && ! printf '%s' "$holder" | grep -q DNAT && continue
+    echo "Port $port sudah dipakai: $holder"
+    return 0
   done
 }
 
@@ -98,16 +126,27 @@ open_firewall() {
     for port in $NMVPN_PORTS; do ufw allow "$port"; done
   fi
   if command -v firewall-cmd >/dev/null 2>&1 && [ "$(firewall-cmd --state 2>/dev/null || true)" = running ]; then
-    for port in $NMVPN_PORTS; do firewall-cmd --permanent --add-port="$port"; done
-    firewall-cmd --reload
+    # No --reload: it drops Docker's iptables chains, so each port goes into
+    # the running rules and the permanent config separately.
+    for port in $NMVPN_PORTS; do
+      firewall-cmd --add-port="$port"
+      firewall-cmd --permanent --add-port="$port"
+    done
   fi
 }
 
-# Our own container holds the ports on a reinstall or upgrade, so it goes
-# before they are checked.
+# Our own container holds the ports on a reinstall or upgrade, so it is
+# stopped before they are checked, and started again if one is refused: a
+# refused upgrade must not take a running hub down.
 release_ports() {
-  docker rm -f "$CONTAINER" 2>/dev/null || true
-  check_ports
+  stopped=""
+  docker stop "$CONTAINER" >/dev/null 2>&1 && stopped=1
+  conflict=$(first_conflict)
+  if [ -n "$conflict" ]; then
+    [ -z "$stopped" ] || docker start "$CONTAINER" >/dev/null
+    die "$conflict"
+  fi
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 }
 
 install_docker() {
@@ -186,7 +225,10 @@ upgrade() {
 main() {
   # The bundle holds the hub's private key and API token, so it is never echoed.
   [ -n "${NMVPN_IMAGE:-}" ] || die "NMVPN_IMAGE belum diisi; pakai perintah instal dari tab VPN netmanager."
-  [ -n "${NMVPN_PORTS:-}" ] || die "NMVPN_PORTS belum diisi; pakai perintah instal dari tab VPN netmanager."
+  if [ -z "${NMVPN_PORTS:-}" ]; then
+    [ "${1:-}" = upgrade ] && die "NMVPN_PORTS belum diisi; pakai perintah upgrade terbaru dari tab VPN netmanager."
+    die "NMVPN_PORTS belum diisi; pakai perintah instal dari tab VPN netmanager."
+  fi
   [ $# -ge 1 ] && [ -n "$1" ] || die "Bundle join (atau 'upgrade') wajib diberikan sebagai argumen pertama."
   if [ "$1" = upgrade ]; then
     upgrade
