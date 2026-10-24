@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 // Command is one program invocation; Env is added to the hub's environment.
@@ -14,9 +15,11 @@ type Command struct {
 	Env  []string
 }
 
-// Process is a started long-running command.
+// Process is a started long-running command. Stop asks it to exit (SIGTERM);
+// Kill does not ask.
 type Process interface {
 	Wait() error
+	Stop() error
 	Kill() error
 }
 
@@ -56,4 +59,5 @@ func (ExecRunner) Run(c Command) error {
 type execProcess struct{ cmd *exec.Cmd }
 
 func (p execProcess) Wait() error { return p.cmd.Wait() }
+func (p execProcess) Stop() error { return p.cmd.Process.Signal(syscall.SIGTERM) }
 func (p execProcess) Kill() error { return p.cmd.Process.Kill() }

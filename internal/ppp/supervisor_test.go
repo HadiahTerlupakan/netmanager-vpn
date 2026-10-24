@@ -6,18 +6,36 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// fakeProc exits on Kill, and on Stop unless it ignores SIGTERM.
 type fakeProc struct {
-	once sync.Once
-	done chan struct{}
+	once        sync.Once
+	done        chan struct{}
+	ignoresStop bool
+	stops       atomic.Int32
+	kills       atomic.Int32
 }
 
 func (p *fakeProc) Wait() error { <-p.done; return errors.New("exited") }
-func (p *fakeProc) Kill() error { p.exit(); return nil }
 func (p *fakeProc) exit()       { p.once.Do(func() { close(p.done) }) }
+
+func (p *fakeProc) Stop() error {
+	p.stops.Add(1)
+	if !p.ignoresStop {
+		p.exit()
+	}
+	return nil
+}
+
+func (p *fakeProc) Kill() error {
+	p.kills.Add(1)
+	p.exit()
+	return nil
+}
 
 // fakeRunner stands in for exec: started processes run until killed or
 // exited by the test, and one-shot commands are recorded.
@@ -26,6 +44,8 @@ type fakeRunner struct {
 	started []string
 	procs   map[string]*fakeProc
 	ran     []string
+	// stubborn names the commands whose processes ignore SIGTERM.
+	stubborn map[string]bool
 }
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{procs: map[string]*fakeProc{}} }
@@ -33,7 +53,7 @@ func newFakeRunner() *fakeRunner { return &fakeRunner{procs: map[string]*fakePro
 func (r *fakeRunner) Start(c Command) (Process, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	p := &fakeProc{done: make(chan struct{})}
+	p := &fakeProc{done: make(chan struct{}), ignoresStop: r.stubborn[c.Path]}
 	r.started = append(r.started, c.Path)
 	r.procs[c.Path] = p
 	return p, nil
@@ -181,5 +201,29 @@ func TestSupervisorCloseStopsChildren(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if r.starts(charonPath) != 1 || r.starts(accelPath) != 1 {
 		t.Fatalf("restarted after Close: %v", r.started)
+	}
+}
+
+// charon cleans its xfrm state up on SIGTERM, so Close asks first and kills
+// only a daemon that has not exited within the grace period.
+func TestSupervisorCloseAsksBeforeKilling(t *testing.T) {
+	s, r, _ := testSupervisor(t)
+	s.stopGrace = 50 * time.Millisecond
+	r.stubborn = map[string]bool{accelPath: true}
+	if err := s.Apply("s", "i", "d"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "running", s.Running)
+	charon, accel := r.proc(charonPath), r.proc(accelPath)
+	start := time.Now()
+	s.Close()
+	if charon.stops.Load() != 1 || charon.kills.Load() != 0 {
+		t.Fatalf("charon: %d stops, %d kills; want SIGTERM only", charon.stops.Load(), charon.kills.Load())
+	}
+	if accel.stops.Load() != 1 || accel.kills.Load() != 1 {
+		t.Fatalf("accel: %d stops, %d kills; want SIGTERM then SIGKILL", accel.stops.Load(), accel.kills.Load())
+	}
+	if waited := time.Since(start); waited < s.stopGrace {
+		t.Fatalf("killed after %v, before the %v grace", waited, s.stopGrace)
 	}
 }

@@ -25,6 +25,10 @@ const (
 	// until then, so loading is retried for as long as the spike waited.
 	loadTimeout = 10 * time.Second
 	loadPoll    = 200 * time.Millisecond
+	// stopGrace is how long a daemon has to exit on SIGTERM before it is
+	// killed. charon removes its xfrm states and policies on the way out;
+	// killed, it leaves them in the host netns, where they outlive the hub.
+	stopGrace = 5 * time.Second
 )
 
 type child struct {
@@ -32,7 +36,9 @@ type child struct {
 	// ready runs once the process has started; an error kills it.
 	ready func() error
 	proc  Process
-	alive bool
+	// exited is closed once proc has been waited for.
+	exited chan struct{}
+	alive  bool
 }
 
 // Supervisor keeps charon and accel-pppd running on the configuration it was
@@ -42,6 +48,7 @@ type Supervisor struct {
 	dir         string
 	run         Runner
 	backoff     time.Duration
+	stopGrace   time.Duration
 	cliAddr     string
 	cliPassword string // fresh per start; lives only in memory and the 0600 conf
 
@@ -59,8 +66,8 @@ func NewSupervisor(dir string) *Supervisor {
 }
 
 func newSupervisor(dir string, run Runner, backoff time.Duration) *Supervisor {
-	s := &Supervisor{dir: dir, run: run, backoff: backoff, cliAddr: cliAddr, cliPassword: rand.Text(),
-		done: make(chan struct{})}
+	s := &Supervisor{dir: dir, run: run, backoff: backoff, stopGrace: stopGrace, cliAddr: cliAddr,
+		cliPassword: rand.Text(), done: make(chan struct{})}
 	env := []string{"STRONGSWAN_CONF=" + s.path(strongswanFile)}
 	s.charon = &child{cmd: Command{Path: charonPath, Env: env}, ready: s.loadIPsec}
 	s.accel = &child{cmd: Command{Path: accelPath, Args: []string{"-c", s.path(daemonFile)}}}
@@ -100,13 +107,14 @@ func (s *Supervisor) Apply(secrets, ipsec, daemon string) error {
 	}
 	reload := s.charon.alive && s.loaded != ipsec
 	var restart Process
+	var exited chan struct{}
 	if daemonChanged {
-		restart = s.accel.proc
+		restart, exited = s.accel.proc, s.accel.exited
 	}
 	s.mu.Unlock()
 	if restart != nil {
 		// Its supervise loop starts it again on the new file.
-		_ = restart.Kill()
+		go s.stopProc(restart, exited)
 	}
 	if reload {
 		return s.loadIPsec()
@@ -193,7 +201,8 @@ func (s *Supervisor) runOnce(c *child) {
 		slog.Error("ppp: start failed", "cmd", c.cmd.Path, "err", err)
 		return
 	}
-	c.proc = proc
+	exited := make(chan struct{})
+	c.proc, c.exited = proc, exited
 	s.mu.Unlock()
 	ok := true
 	if c.ready != nil {
@@ -206,8 +215,9 @@ func (s *Supervisor) runOnce(c *child) {
 	s.setAlive(c, ok)
 	err = proc.Wait()
 	s.mu.Lock()
-	c.alive, c.proc = false, nil
+	c.alive, c.proc, c.exited = false, nil, nil
 	s.mu.Unlock()
+	close(exited)
 	slog.Warn("ppp: exited", "cmd", c.cmd.Path, "err", err)
 }
 
@@ -217,18 +227,32 @@ func (s *Supervisor) setAlive(c *child, alive bool) {
 	c.alive = alive && !s.closed
 }
 
-// Close stops both daemons and keeps them stopped.
+// Close stops both daemons, together, and keeps them stopped. It returns
+// once both have exited.
 func (s *Supervisor) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
 	s.closed = true
 	close(s.done)
+	var wg sync.WaitGroup
 	for _, c := range []*child{s.charon, s.accel} {
-		if c.proc != nil {
-			_ = c.proc.Kill()
+		if p, exited := c.proc, c.exited; p != nil {
+			wg.Go(func() { s.stopProc(p, exited) })
 		}
+	}
+	s.mu.Unlock()
+	wg.Wait()
+}
+
+// stopProc asks p to exit and kills it if it has not within stopGrace.
+func (s *Supervisor) stopProc(p Process, exited <-chan struct{}) {
+	_ = p.Stop()
+	select {
+	case <-exited:
+	case <-time.After(s.stopGrace):
+		_ = p.Kill()
 	}
 }
