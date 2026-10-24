@@ -57,8 +57,7 @@ func (c *Core) pushPeer(ctx context.Context, rt store.Router, h store.Hub) {
 }
 
 func (c *Core) pushIf(ctx context.Context, routerID string, h store.Hub, state string) {
-	c.protoMu.Lock()
-	defer c.protoMu.Unlock()
+	defer c.routerMu.lock(routerID)()
 	c.pushIfLocked(ctx, routerID, h, state)
 }
 

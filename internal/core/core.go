@@ -63,11 +63,12 @@ type Core struct {
 	// regMu serializes registry rewrites (status refresh, join reissue) so a
 	// stale snapshot cannot overwrite a freshly reissued hub.
 	regMu sync.Mutex
-	// protoMu serialises a router's protocol and login changes with every
+	// routerMu serialises one router's protocol and login changes with every
 	// push of its peer, so a push from an older row cannot land after a
-	// switch and be marked synced. It is taken with no other core lock held
-	// and nothing under it takes applyMu or regMu.
-	protoMu sync.Mutex
+	// switch and be marked synced. Routers never wait for each other. A
+	// router's lock is taken with no other core lock held, and nothing under
+	// it takes applyMu or regMu.
+	routerMu routerLocks
 	// afterAdminTaken lets a test slip a competing insert between the address
 	// lookup and the insert, which cannot be timed reliably with goroutines.
 	afterAdminTaken func()

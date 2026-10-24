@@ -427,3 +427,47 @@ func TestRouterScriptL2TPRendersPSKPerHub(t *testing.T) {
 		t.Fatal("script lacks the PPP user")
 	}
 }
+
+// A push stuck on one router's hub must not hold up another router: the
+// caller of CreateRouter gives up after a few seconds and would retry into a
+// duplicate.
+func TestStuckPushDoesNotBlockOtherRouter(t *testing.T) {
+	f, rec, hubs := routerFixture(t, 2)
+	ctx := context.Background()
+	rec.failUpserts = 1
+	a, _ := f.core.CreateRouter(ctx, "a", []string{hubs[0].ID}, "")
+	rtA, _ := f.st.GetRouter(a.ID)
+	entered, release := make(chan struct{}), make(chan struct{})
+	rec.beforeUpsert = func() {
+		close(entered)
+		<-release
+	}
+	doneA := make(chan struct{})
+	go func() {
+		f.core.pushPeer(ctx, rtA, hubs[0])
+		close(doneA)
+	}()
+	<-entered
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := f.core.CreateRouter(ctx, "b", []string{hubs[1].ID}, "")
+		doneB <- err
+	}()
+	var errB error
+	select {
+	case errB = <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Error("router B waited for router A's stuck push")
+		close(release)
+		errB = <-doneB
+	}
+	if errB != nil {
+		t.Error(errB)
+	}
+	select {
+	case <-release:
+	default:
+		close(release)
+	}
+	<-doneA
+}

@@ -163,9 +163,9 @@ func (c *Core) prepareProtocol(id, protocol string) (store.Router, string, error
 // ProtocolScript renders the full script for protocol without switching the
 // router or touching its hubs: the operator pastes it first, then switches.
 func (c *Core) ProtocolScript(id, protocol string) (string, error) {
-	c.protoMu.Lock()
+	unlock := c.routerMu.lock(id)
 	rt, protocol, err := c.prepareProtocol(id, protocol)
-	c.protoMu.Unlock()
+	unlock()
 	if err != nil {
 		return "", err
 	}
@@ -185,8 +185,7 @@ func (c *Core) ProtocolScript(id, protocol string) (string, error) {
 // marked synced on the old protocol. The current protocol is a no-op even if
 // a hub has since stopped serving it.
 func (c *Core) SetRouterProtocol(ctx context.Context, id, protocol string) (RouterView, error) {
-	c.protoMu.Lock()
-	defer c.protoMu.Unlock()
+	defer c.routerMu.lock(id)()
 	same, err := c.hasProtocol(id, protocol)
 	if err != nil {
 		return RouterView{}, err
