@@ -51,11 +51,24 @@ func (c *Core) retryPending(ctx context.Context, h store.Hub) error {
 }
 
 // pushPeer registers the router on a hub and records the outcome. A failure is
-// not returned: the row stays pending and SyncPending retries it. The router
-// and its link are re-read first because callers work from snapshots: pushing
-// for a router deleted or unassigned since would re-register a revoked peer.
+// not returned: the row stays pending and SyncPending retries it.
 func (c *Core) pushPeer(ctx context.Context, rt store.Router, h store.Hub) {
-	if c.linkState(rt.ID, h.ID) != store.SyncStatePending {
+	c.pushIf(ctx, rt.ID, h, store.SyncStatePending)
+}
+
+func (c *Core) pushIf(ctx context.Context, routerID string, h store.Hub, state string) {
+	c.protoMu.Lock()
+	defer c.protoMu.Unlock()
+	c.pushIfLocked(ctx, routerID, h, state)
+}
+
+// pushIfLocked pushes the router as it is stored now, if its link to the hub
+// is in state. Callers work from snapshots: pushing for a router deleted or
+// unassigned since would re-register a revoked peer, and pushing an older row
+// would put the hub back on a protocol the router has left.
+func (c *Core) pushIfLocked(ctx context.Context, routerID string, h store.Hub, state string) {
+	rt, got := c.linkState(routerID, h.ID)
+	if got != state {
 		return
 	}
 	c.register(ctx, rt, h)
@@ -101,22 +114,23 @@ func (c *Core) peerSpec(rt store.Router) (PeerSpec, error) {
 	return spec, nil
 }
 
-// linkState re-reads the sync state of the router's link to the hub; it is
-// empty when the router is gone or no longer lists the hub.
-func (c *Core) linkState(routerID, hubID string) string {
-	if _, err := c.st.GetRouter(routerID); err != nil {
-		return ""
+// linkState re-reads the router and the sync state of its link to the hub;
+// the state is empty when the router is gone or no longer lists the hub.
+func (c *Core) linkState(routerID, hubID string) (store.Router, string) {
+	rt, err := c.st.GetRouter(routerID)
+	if err != nil {
+		return store.Router{}, ""
 	}
 	links, err := c.st.ListRouterHubs(routerID)
 	if err != nil {
-		return ""
+		return store.Router{}, ""
 	}
 	for _, l := range links {
 		if l.HubID == hubID {
-			return l.SyncState
+			return rt, l.SyncState
 		}
 	}
-	return ""
+	return store.Router{}, ""
 }
 
 // prune lists the hub's peers before reading the registry: a router registered
@@ -145,8 +159,8 @@ func (c *Core) prune(ctx context.Context, h store.Hub) error {
 		}
 	}
 	for pub, rt := range assigned {
-		if !have[pub] && c.linkState(rt.ID, h.ID) == store.SyncStateSynced {
-			c.register(ctx, rt, h)
+		if !have[pub] {
+			c.pushIf(ctx, rt.ID, h, store.SyncStateSynced)
 		}
 	}
 	return nil

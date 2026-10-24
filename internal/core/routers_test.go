@@ -25,6 +25,7 @@ type recHubs struct {
 	deletes     []peerCall
 	failUpserts int
 	failDeletes bool
+	failPSK     bool
 	present     map[string]map[string]bool // hub ID -> public keys it carries
 	psks        []pskCall
 	protocols   map[string][]string // hub ID -> what Info reports; wireguard when unset
@@ -91,6 +92,9 @@ func (r *recHubs) Peers(_ context.Context, h store.Hub) ([]HubPeerStatus, error)
 func (r *recHubs) SetIPsecPSK(_ context.Context, h store.Hub, psk string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.failPSK {
+		return errors.New("hub unreachable")
+	}
 	r.psks = append(r.psks, pskCall{h.ID, psk})
 	return nil
 }

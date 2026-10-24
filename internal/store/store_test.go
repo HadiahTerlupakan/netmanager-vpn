@@ -560,6 +560,36 @@ func TestSetRouterProtocolRoundTrip(t *testing.T) {
 	}
 }
 
+// The login is minted once: a second writer racing the first must not replace
+// it, and the protocol column is never touched.
+func TestSetRouterPPPLoginOnlyWhenEmpty(t *testing.T) {
+	s := openTemp(t)
+	r := newRouter(t, s, "r1", "10.9.0.2")
+	if err := s.SetRouterPPPLogin(r.ID, "nmvpn-a", "sealed-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRouterPPPLogin(r.ID, "nmvpn-b", "sealed-b"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRouter(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PPPUser != "nmvpn-a" || got.PPPPassword != "sealed-a" || got.Protocol != "wireguard" {
+		t.Fatalf("got %q/%q/%q", got.Protocol, got.PPPUser, got.PPPPassword)
+	}
+	other := newRouter(t, s, "r2", "10.9.0.3")
+	if err := s.DeleteRouter(other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRouterPPPLogin(other.ID, "nmvpn-c", "sealed-c"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRouter(other.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("released router: %v", err)
+	}
+}
+
 func TestHubProtocolsRoundTrip(t *testing.T) {
 	s := openTemp(t)
 	h := newHub(t, s, "h1", "10.8.0.2")

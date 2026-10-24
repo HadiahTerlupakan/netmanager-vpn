@@ -83,8 +83,9 @@ func (c *Core) sealedRandom(n int) (string, error) {
 }
 
 // ensurePPP gives the router a PPP login once and keeps it for good, so a
-// switch back to L2TP does not need the router's script re-pasted. The
-// router's protocol is left as it is.
+// switch back to L2TP does not need the router's script re-pasted. rt may be
+// stale: the store keeps whichever login was written first, and the row is
+// re-read for it, protocol included.
 func (c *Core) ensurePPP(rt store.Router) (store.Router, error) {
 	if rt.PPPUser != "" && rt.PPPPassword != "" {
 		return rt, nil
@@ -93,12 +94,10 @@ func (c *Core) ensurePPP(rt store.Router) (store.Router, error) {
 	if err != nil {
 		return store.Router{}, err
 	}
-	user := pppUserPrefix + rt.ID
-	if err := c.st.SetRouterProtocol(rt.ID, routerProtocol(rt), user, sealed); err != nil {
+	if err := c.st.SetRouterPPPLogin(rt.ID, pppUserPrefix+rt.ID, sealed); err != nil {
 		return store.Router{}, err
 	}
-	rt.PPPUser, rt.PPPPassword = user, sealed
-	return rt, nil
+	return c.st.GetRouter(rt.ID)
 }
 
 // ensureHubPSK gives a hub created before L2TP its PSK.
@@ -164,7 +163,9 @@ func (c *Core) prepareProtocol(id, protocol string) (store.Router, string, error
 // ProtocolScript renders the full script for protocol without switching the
 // router or touching its hubs: the operator pastes it first, then switches.
 func (c *Core) ProtocolScript(id, protocol string) (string, error) {
+	c.protoMu.Lock()
 	rt, protocol, err := c.prepareProtocol(id, protocol)
+	c.protoMu.Unlock()
 	if err != nil {
 		return "", err
 	}
@@ -179,10 +180,13 @@ func (c *Core) ProtocolScript(id, protocol string) (string, error) {
 }
 
 // SetRouterProtocol switches the router's protocol and re-registers it on
-// every hub. Each link goes pending first, so a hub missed now is retried by
-// SyncPending rather than left carrying the old protocol as synced.
-// The current protocol is a no-op even if a hub has since stopped serving it.
+// every online hub; offline ones are left to SyncPending. Every link goes
+// pending before the protocol is written, so a failure part-way leaves no hub
+// marked synced on the old protocol. The current protocol is a no-op even if
+// a hub has since stopped serving it.
 func (c *Core) SetRouterProtocol(ctx context.Context, id, protocol string) (RouterView, error) {
+	c.protoMu.Lock()
+	defer c.protoMu.Unlock()
 	same, err := c.hasProtocol(id, protocol)
 	if err != nil {
 		return RouterView{}, err
@@ -194,10 +198,6 @@ func (c *Core) SetRouterProtocol(ctx context.Context, id, protocol string) (Rout
 	if err != nil {
 		return RouterView{}, err
 	}
-	if err := c.st.SetRouterProtocol(id, protocol, rt.PPPUser, rt.PPPPassword); err != nil {
-		return RouterView{}, err
-	}
-	rt.Protocol = protocol
 	hubs, err := c.routerHubs(id)
 	if err != nil {
 		return RouterView{}, err
@@ -207,8 +207,13 @@ func (c *Core) SetRouterProtocol(ctx context.Context, id, protocol string) (Rout
 			return RouterView{}, err
 		}
 	}
+	if err := c.st.SetRouterProtocol(id, protocol, rt.PPPUser, rt.PPPPassword); err != nil {
+		return RouterView{}, err
+	}
 	for _, h := range hubs {
-		c.pushPeer(ctx, rt, h)
+		if h.Status == store.HubStatusOnline {
+			c.pushIfLocked(ctx, id, h, store.SyncStatePending)
+		}
 	}
 	return c.GetRouter(id)
 }
@@ -274,8 +279,11 @@ func (c *Core) syncHubIPsec(ctx context.Context, h store.Hub) error {
 	if err != nil {
 		return err
 	}
+	// Without the key this pass, an L2TP the hub reports may rest on a
+	// different PSK, so the stored protocols are kept as they are.
 	if err := c.hubs.SetIPsecPSK(ctx, h, psk); err != nil {
 		slog.Warn("hub IPsec key not pushed", "hub", h.ID, "err", err)
+		return nil
 	}
 	info, err := c.hubs.Info(ctx, h)
 	if err != nil {

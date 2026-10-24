@@ -9,17 +9,21 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/routeros"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/store"
 )
 
-// l2tpFixture is routerFixture with every hub reporting L2TP.
+// l2tpFixture is routerFixture with every hub serving L2TP, in the store and
+// in what Info reports to a sync pass.
 func l2tpFixture(t *testing.T, hubCount int) (fixture, *recHubs, []store.Hub) {
 	t.Helper()
 	f, rec, hubs := routerFixture(t, hubCount)
+	rec.protocols = map[string][]string{}
 	for i, h := range hubs {
+		rec.protocols[h.ID] = []string{"wireguard", "l2tp"}
 		if err := f.st.UpdateHubProtocols(h.ID, []string{"wireguard", "l2tp"}); err != nil {
 			t.Fatal(err)
 		}
@@ -165,6 +169,95 @@ func TestSetRouterProtocolLeavesFailedHubPending(t *testing.T) {
 	if got.Hubs[0].SyncState != store.SyncStatePending || got.Hubs[1].SyncState != store.SyncStateSynced {
 		t.Fatalf("hubs %+v", got.Hubs)
 	}
+	before := len(rec.upserts)
+	if err := f.core.SyncPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	retried := rec.upserts[before:]
+	if len(retried) != 1 || retried[0].hubID != hubs[0].ID || retried[0].spec.Protocol != "l2tp" {
+		t.Fatalf("retried %+v", retried)
+	}
+	if got, _ = f.core.GetRouter(v.ID); got.Hubs[0].SyncState != store.SyncStateSynced {
+		t.Fatalf("hubs %+v", got.Hubs)
+	}
+}
+
+// A sync pass pushing from its snapshot while the router switches must not
+// leave the hub on the old protocol marked synced.
+func TestSwitchDuringSyncEndsOnNewProtocol(t *testing.T) {
+	f, rec, hubs := l2tpFixture(t, 1)
+	ctx := context.Background()
+	rec.failUpserts = 1
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID}, "")
+	done := make(chan error, 1)
+	rec.beforeUpsert = func() {
+		go func() {
+			_, err := f.core.SetRouterProtocol(ctx, v.ID, "l2tp")
+			done <- err
+		}()
+		// Give the switch time to finish if nothing holds it back; a
+		// serialised switch waits for this push instead.
+		select {
+		case err := <-done:
+			done <- err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if err := f.core.SyncPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	last := rec.upserts[len(rec.upserts)-1]
+	got, _ := f.core.GetRouter(v.ID)
+	if last.spec.Protocol != "l2tp" || got.Protocol != "l2tp" || got.Hubs[0].SyncState != store.SyncStateSynced {
+		t.Fatalf("hub last got %+v, router %+v", last.spec, got)
+	}
+}
+
+func TestSetRouterProtocolSkipsOfflineHub(t *testing.T) {
+	f, rec, hubs := l2tpFixture(t, 2)
+	ctx := context.Background()
+	v, _ := f.core.CreateRouter(ctx, "x", []string{hubs[0].ID, hubs[1].ID}, "")
+	if err := f.st.UpdateHubStatus(hubs[1].ID, store.HubStatusOffline, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rec.upserts)
+	got, err := f.core.SetRouterProtocol(ctx, v.ID, "l2tp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := rec.upserts[before:]
+	if len(pushed) != 1 || pushed[0].hubID != hubs[0].ID || got.Hubs[1].SyncState != store.SyncStatePending {
+		t.Fatalf("pushed %+v hubs %+v", pushed, got.Hubs)
+	}
+}
+
+// ensurePPP works from a snapshot; it must neither write that snapshot's
+// protocol back nor replace a login another caller stored meanwhile.
+func TestEnsurePPPFromStaleSnapshot(t *testing.T) {
+	f, _, hubs := l2tpFixture(t, 1)
+	v, _ := f.core.CreateRouter(context.Background(), "x", []string{hubs[0].ID}, "")
+	stale, _ := f.st.GetRouter(v.ID)
+	if err := f.st.SetRouterProtocol(v.ID, "l2tp", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.core.ensurePPP(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.core.ensurePPP(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := f.st.GetRouter(v.ID)
+	if stored.Protocol != "l2tp" {
+		t.Fatalf("ensurePPP wrote protocol %q back", stored.Protocol)
+	}
+	if first.PPPPassword != stored.PPPPassword || second.PPPPassword != stored.PPPPassword {
+		t.Fatal("racing ensurePPP calls minted different passwords")
+	}
 }
 
 func TestSetRouterProtocolRejectsUnsupportedHub(t *testing.T) {
@@ -237,6 +330,20 @@ func TestSyncEnsuresPSKForOldHub(t *testing.T) {
 	}
 	if h2, _ := f.st.GetHub(h.ID); h2.IPsecPSK != h.IPsecPSK || rec.psks[1].psk != psk {
 		t.Fatal("PSK rotated on the second pass")
+	}
+}
+
+// A hub that did not take the PSK this pass may report L2TP on a key the core
+// cannot vouch for; its stored protocols stay as they were.
+func TestSyncKeepsProtocolsWhenPSKPushFails(t *testing.T) {
+	f, rec, hubs := routerFixture(t, 1)
+	rec.protocols = map[string][]string{hubs[0].ID: {"wireguard", "l2tp"}}
+	rec.failPSK = true
+	if err := f.core.SyncPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := f.st.GetHub(hubs[0].ID); len(h.Protocols) != 1 || h.Protocols[0] != "wireguard" {
+		t.Fatalf("protocols %v", h.Protocols)
 	}
 }
 

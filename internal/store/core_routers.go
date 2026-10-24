@@ -79,6 +79,16 @@ func (s *Store) SetRouterProtocol(id, protocol, pppUser, sealedPPPPassword strin
 		protocol, pppUser, sealedPPPPassword, id))
 }
 
+// SetRouterPPPLogin stores an unreleased router's PPP login, sealed, only if
+// it has none: the first writer wins and a later one is a no-op, so callers
+// re-read the row for the login in force. The protocol is left alone.
+func (s *Store) SetRouterPPPLogin(id, pppUser, sealedPPPPassword string) error {
+	_, err := s.db.Exec(
+		`UPDATE routers SET ppp_user = ?, ppp_password = ? WHERE id = ? AND released_at IS NULL AND ppp_user = ''`,
+		pppUser, sealedPPPPassword, id)
+	return err
+}
+
 // ClaimRouter marks a pending router as claimed by its device and records the
 // device's ref; any other router (already active, released, unknown) yields
 // ErrNotFound.
