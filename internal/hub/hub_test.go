@@ -2,6 +2,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hadiahterlupakan/netmanager-vpn/internal/firewall"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/joinbundle"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/ppp"
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/secret"
@@ -17,24 +19,77 @@ import (
 )
 
 // recorder keeps the last config per interface, which wgdevice.Memory cannot:
-// it holds only the most recent Apply regardless of interface.
+// it holds only the most recent Apply regardless of interface. Like the
+// kernel, it refuses a route another link holds (held: destination -> link)
+// and keeps what it routed per interface.
 type recorder struct {
 	*wgdevice.Memory
 	mu      sync.Mutex
 	applied map[string]wgdevice.Config
 	calls   int
+	held    map[string]string
+	routed  map[string]map[string]bool
+	// beforeNM runs at the start of each wg-nm Apply.
+	beforeNM func()
 }
 
 func newRecorder() *recorder {
-	return &recorder{Memory: wgdevice.NewMemory(), applied: map[string]wgdevice.Config{}}
+	return &recorder{Memory: wgdevice.NewMemory(), applied: map[string]wgdevice.Config{},
+		held: map[string]string{}, routed: map[string]map[string]bool{}}
 }
 
 func (r *recorder) Apply(c wgdevice.Config) error {
+	if c.InterfaceName == ifaceNM && r.beforeNM != nil {
+		r.beforeNM()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	r.applied[c.InterfaceName] = c
-	return r.Memory.Apply(c)
+	routes := map[string]bool{}
+	var busy, foreign []string
+	for _, p := range c.Peers {
+		for _, dst := range p.AllowedIPs {
+			link, held := r.held[dst]
+			switch {
+			case !held:
+				routes[dst] = true
+			case c.YieldTo != "" && strings.HasPrefix(link, c.YieldTo):
+				busy = append(busy, dst)
+			default:
+				foreign = append(foreign, dst)
+			}
+		}
+	}
+	r.routed[c.InterfaceName] = routes
+	if err := r.Memory.Apply(c); err != nil {
+		return err
+	}
+	if len(foreign) > 0 {
+		return fmt.Errorf("add route %v: file exists", foreign)
+	}
+	if len(busy) > 0 {
+		return fmt.Errorf("%w: %v", wgdevice.ErrRouteBusy, busy)
+	}
+	return nil
+}
+
+func (r *recorder) hold(dst, link string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.held[dst] = link
+}
+
+func (r *recorder) release(dst string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.held, dst)
+}
+
+func (r *recorder) isRouted(iface, dst string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.routed[iface][dst]
 }
 
 type fakeFW struct{ rules string }
@@ -495,5 +550,78 @@ func TestPeerStatusesSurvivesSessionListFailure(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("statuses = %+v", got)
+	}
+}
+
+// A router moving from L2TP to WireGuard still has its session's nmpppN
+// holding its /32 when wg-nm wants it. Its login and session must be ended
+// all the same, every other router and the firewall applied, and the route
+// taken over once the link is gone.
+func TestL2TPToWireGuardWithLiveSession(t *testing.T) {
+	e, p := newPPPEnv(t)
+	addr := netip.MustParseAddr("10.100.0.11")
+	if err := e.svc.UpsertPeer(wgPeer("other", "10.100.0.10")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.UpsertPeer(l2tpPeer("key", addr.String(), "nmvpn-0b")); err != nil {
+		t.Fatal(err)
+	}
+	p.sessions.SetLive(addr)
+	e.dev.hold("10.100.0.11/32", "nmppp0")
+	e.fw.rules, e.ipt.calls = "", nil
+	var secretsAtNM string
+	var endedAtNM []netip.Addr
+	e.dev.beforeNM = func() { secretsAtNM, endedAtNM = p.rt.secrets, p.sessions.Terminated() }
+
+	if err := e.svc.UpsertPeer(wgPeer("key", addr.String())); err != nil {
+		t.Fatalf("switch with the session still up: %v", err)
+	}
+	if strings.Contains(secretsAtNM, "nmvpn-0b") || len(endedAtNM) != 1 || endedAtNM[0] != addr {
+		t.Fatalf("wg-nm applied before PPP: secrets %q, ended %v", secretsAtNM, endedAtNM)
+	}
+	if !e.dev.isRouted(ifaceNM, "10.100.0.10/32") || e.dev.isRouted(ifaceNM, "10.100.0.11/32") {
+		t.Fatalf("routed = %v", e.dev.routed[ifaceNM])
+	}
+	if e.fw.rules == "" || len(e.ipt.calls) == 0 {
+		t.Fatalf("firewall %q or DOCKER-USER (%d calls) skipped", e.fw.rules, len(e.ipt.calls))
+	}
+
+	e.dev.release("10.100.0.11/32")
+	if err := e.svc.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if !e.dev.isRouted(ifaceNM, "10.100.0.11/32") {
+		t.Fatal("route not taken over once the PPP link was gone")
+	}
+}
+
+// A collision with a link wg-nm does not yield to is still an error, but the
+// firewall is applied regardless.
+func TestForeignRouteCollisionStillAppliesFirewall(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.Join(e.bundle()); err != nil {
+		t.Fatal(err)
+	}
+	e.dev.hold("10.100.0.10/32", "eth1")
+	e.fw.rules = ""
+	if err := e.svc.UpsertPeer(wgPeer("routerpub", "10.100.0.10")); err == nil {
+		t.Fatal("foreign route collision not reported")
+	}
+	if e.fw.rules == "" || e.sysctls["net.ipv4.ip_forward"] != "1" {
+		t.Fatal("firewall or forwarding skipped after a wg-nm failure")
+	}
+}
+
+func TestFirewallCarriesPPPRulesOnlyWithPPP(t *testing.T) {
+	wg := newEnv(t)
+	if err := wg.svc.Join(wg.bundle()); err != nil {
+		t.Fatal(err)
+	}
+	if wg.fw.rules != firewall.RenderHub(false) {
+		t.Fatalf("WireGuard-only hub got:\n%s", wg.fw.rules)
+	}
+	l2tp, _ := newPPPEnv(t)
+	if l2tp.fw.rules != firewall.RenderHub(true) {
+		t.Fatalf("L2TP hub got:\n%s", l2tp.fw.rules)
 	}
 }

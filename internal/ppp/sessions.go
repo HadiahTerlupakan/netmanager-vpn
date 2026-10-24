@@ -1,6 +1,9 @@
 package ppp
 
-import "net/netip"
+import (
+	"net/netip"
+	"strings"
+)
 
 // Sessions sees the PPP sessions the daemon holds and ends one.
 type Sessions interface {
@@ -13,18 +16,20 @@ type Sessions interface {
 
 // pppLink is what Live needs to know of one kernel link.
 type pppLink struct {
+	name        string
 	encap       string
 	up          bool
 	local, peer netip.Addr
 }
 
-// livePeers keeps only links that are accel-ppp's: up, of type ppp, and with
-// the hub's gateway address as their local end. Any other PPP link on the
-// host, such as its own PPPoE uplink, is never stamped or terminated.
+// livePeers keeps only links that are accel-ppp's: named nmppp*, up, of type
+// ppp, and with the hub's gateway address as their local end. Any other PPP
+// link on the host, such as its own PPPoE uplink, is never stamped or
+// terminated.
 func livePeers(links []pppLink, gw netip.Addr) map[netip.Addr]bool {
 	live := map[netip.Addr]bool{}
 	for _, l := range links {
-		if l.encap == "ppp" && l.up && l.local == gw && l.peer.IsValid() {
+		if strings.HasPrefix(l.name, LinkPrefix) && l.encap == "ppp" && l.up && l.local == gw && l.peer.IsValid() {
 			live[l.peer] = true
 		}
 	}

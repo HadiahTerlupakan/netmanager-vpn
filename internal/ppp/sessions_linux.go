@@ -39,7 +39,7 @@ func (s linuxSessions) Live() (map[netip.Addr]bool, error) {
 			return nil, fmt.Errorf("ppp: addresses of %s: %w", a.Name, err)
 		}
 		for _, ad := range addrs {
-			pl := pppLink{encap: a.EncapType, up: a.Flags&net.FlagUp != 0}
+			pl := pppLink{name: a.Name, encap: a.EncapType, up: a.Flags&net.FlagUp != 0}
 			pl.local, _ = netip.AddrFromSlice(ad.IP.To4())
 			if ad.Peer != nil {
 				pl.peer, _ = netip.AddrFromSlice(ad.Peer.IP.To4())

@@ -19,11 +19,15 @@ const dockerUserChain = "DOCKER-USER"
 // chain Docker keeps for exactly this; these accepts only let routed tunnel
 // traffic past Docker's policy, while our nft table still applies its drops.
 var (
-	HubDockerAccepts = [][]string{
+	hubWGAccepts = [][]string{
 		{"-i", "wg-nm", "-o", "wg-up", "-j", "ACCEPT"},
 		{"-i", "wg-up", "-o", "wg-nm", "-j", "ACCEPT"},
-		{"-i", "ppp+", "-o", "wg-up", "-j", "ACCEPT"},
-		{"-i", "wg-up", "-o", "ppp+", "-j", "ACCEPT"},
+	}
+	// accel-ppp names its links nmppp*, so the host's own PPP uplink is not
+	// let through.
+	hubPPPAccepts = [][]string{
+		{"-i", "nmppp+", "-o", "wg-up", "-j", "ACCEPT"},
+		{"-i", "wg-up", "-o", "nmppp+", "-j", "ACCEPT"},
 	}
 	// The core forwards wg-core to wg-core: an admin device reaching a router
 	// through radpro.
@@ -31,6 +35,15 @@ var (
 		{"-i", "wg-core", "-o", "wg-core", "-j", "ACCEPT"},
 	}
 )
+
+// HubDockerAccepts returns the hub's DOCKER-USER accepts; the nmppp ones only
+// when the hub serves L2TP, as with RenderHub.
+func HubDockerAccepts(pppEnabled bool) [][]string {
+	if !pppEnabled {
+		return hubWGAccepts
+	}
+	return append(append([][]string{}, hubWGAccepts...), hubPPPAccepts...)
+}
 
 // EnsureDockerUserAccepts inserts each rule into DOCKER-USER unless it is
 // already there. A host without Docker has no such chain and is left alone.

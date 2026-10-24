@@ -3,7 +3,7 @@ flush table inet netmanager_vpn
 table inet netmanager_vpn {
 	chain prerouting {
 		type filter hook prerouting priority -150; policy accept;
-		iifname "ppp*" fib saddr . iif oif missing drop
+		iifname "nmppp*" fib saddr . iif oif missing drop
 	}
 	chain forward {
 		type filter hook forward priority 0; policy accept;
@@ -15,14 +15,14 @@ table inet netmanager_vpn {
 		iifname "wg-nm" drop
 		iifname "wg-up" oifname "wg-nm" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
 		iifname "wg-up" oifname "wg-nm" drop
-		iifname "ppp*" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
-		iifname "ppp*" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
-		iifname "ppp*" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
-		iifname "ppp*" tcp flags & (syn | ack) == syn drop
-		iifname "ppp*" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
-		iifname "ppp*" drop
-		iifname "wg-up" oifname "ppp*" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
-		iifname "wg-up" oifname "ppp*" drop
+		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
+		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
+		iifname "nmppp*" tcp flags & (syn | ack) == syn drop
+		iifname "nmppp*" oifname "wg-up" ip daddr { 10.99.0.1, 10.99.128.0/24 } tcp sport { 8728, 8291, 22 } accept
+		iifname "nmppp*" drop
+		iifname "wg-up" oifname "nmppp*" ip saddr { 10.99.0.1, 10.99.128.0/24 } accept
+		iifname "wg-up" oifname "nmppp*" drop
 	}
 	chain input {
 		type filter hook input priority 0; policy accept;
@@ -31,7 +31,7 @@ table inet netmanager_vpn {
 		iifname "wg-nm" icmp type echo-request accept
 		iifname "wg-nm" drop
 		udp dport 1701 meta ipsec missing drop
-		iifname "ppp*" icmp type echo-request accept
-		iifname "ppp*" drop
+		iifname "nmppp*" icmp type echo-request accept
+		iifname "nmppp*" drop
 	}
 }

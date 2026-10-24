@@ -83,8 +83,8 @@ func TestRenderDaemonMatchesSpike(t *testing.T) {
 	for _, want := range []string{
 		"[modules]\nlog_file\nl2tp\nauth_mschap_v2\nchap-secrets\n",
 		"[common]\nsingle-session=replace\n",
-		"mtu=1380\nmru=1380\nccp=0\nipv4=require\nipv6=deny\nlcp-echo-interval=30\nlcp-echo-failure=4\n",
-		"[l2tp]\nverbose=1\nifname=ppp%d\n",
+		"mtu=1380\nmru=1380\nccp=0\nipv4=require\nipv6=deny\nlcp-echo-interval=10\nlcp-echo-failure=3\n",
+		"[l2tp]\nverbose=1\nifname=" + LinkPrefix + "%d\n",
 		"gw-ip-address=10.99.0.2\nchap-secrets=/run/nmvpn/ppp/chap-secrets\n",
 		"[client-ip-range]\n0.0.0.0/5\n8.0.0.0/7\n11.0.0.0/8\n12.0.0.0/6\n16.0.0.0/4\n32.0.0.0/3\n64.0.0.0/2\n128.0.0.0/1\n",
 	} {
@@ -102,13 +102,20 @@ func TestHostSupported(t *testing.T) {
 		files []string
 		want  bool
 	}{
-		"neither":     {nil, false},
-		"no module":   {[]string{"dev/ppp"}, false},
-		"no /dev/ppp": {[]string{"sys/module/l2tp_ppp"}, false},
-		"both":        {[]string{"dev/ppp", "sys/module/l2tp_ppp"}, true},
+		"neither":       {nil, false},
+		"no module":     {[]string{"dev/ppp"}, false},
+		"no /dev/ppp":   {[]string{"sys/module/l2tp_ppp", "sys/module/esp4", "sys/module/xfrm_user"}, false},
+		"no esp4":       {[]string{"dev/ppp", "sys/module/l2tp_ppp", "sys/module/xfrm_user"}, false},
+		"no xfrm_user":  {[]string{"dev/ppp", "sys/module/l2tp_ppp", "sys/module/esp4"}, false},
+		"all loaded":    {[]string{"dev/ppp", "sys/module/l2tp_ppp", "sys/module/esp4", "sys/module/xfrm_user"}, true},
+		"esp4 built in": {[]string{"dev/ppp", "sys/module/l2tp_ppp", "sys/module/xfrm_user", "builtin"}, true},
 	} {
 		root := t.TempDir()
 		for _, f := range c.files {
+			if f == "builtin" {
+				writeBuiltin(t, root, "kernel/net/ipv4/esp4.ko\nkernel/net/key/af_key.ko\n")
+				continue
+			}
 			p := filepath.Join(root, f)
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				t.Fatal(err)
@@ -119,6 +126,23 @@ func TestHostSupported(t *testing.T) {
 		}
 		if got := HostSupported(root); got != c.want {
 			t.Errorf("%s: got %v", name, got)
+		}
+	}
+}
+
+// writeBuiltin lays out the running kernel's modules.builtin under root.
+func writeBuiltin(t *testing.T, root, list string) {
+	t.Helper()
+	for path, content := range map[string]string{
+		"proc/sys/kernel/osrelease":              "6.8.0-test\n",
+		"lib/modules/6.8.0-test/modules.builtin": list,
+	} {
+		p := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

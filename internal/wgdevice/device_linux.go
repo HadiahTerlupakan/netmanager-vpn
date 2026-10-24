@@ -155,18 +155,23 @@ func syncRoutes(link netlink.Link, cfg Config) error {
 			return fmt.Errorf("remove stale route %s: %w", route.Dst, err)
 		}
 	}
-	for _, network := range add {
-		route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: network}
-		if err := netlink.RouteAdd(route); err != nil {
-			// Deliberately not RouteReplace: a peer subnet that collides with an
-			// existing host route must fail loudly rather than hijack it.
-			if errors.Is(err, syscall.EEXIST) {
-				return fmt.Errorf("add route %s: already routed via another interface, remove the conflicting route or change the peer's subnet: %w", network, err)
-			}
-			return fmt.Errorf("add route %s: %w", network, err)
-		}
+	return addRoutes(add, cfg.YieldTo, func(dst *net.IPNet) error {
+		return netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst})
+	}, routeHolder)
+}
+
+// routeHolder names the link the main table routes dst through, or "" when
+// that cannot be read.
+func routeHolder(dst *net.IPNet) string {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Dst: dst}, netlink.RT_FILTER_DST)
+	if err != nil || len(routes) == 0 {
+		return ""
 	}
-	return nil
+	link, err := netlink.LinkByIndex(routes[0].LinkIndex)
+	if err != nil {
+		return ""
+	}
+	return link.Attrs().Name
 }
 
 // Status reads the live peer state back from the kernel via wgctrl.

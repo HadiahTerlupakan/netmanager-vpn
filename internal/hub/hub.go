@@ -5,6 +5,7 @@ package hub
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -134,6 +135,11 @@ func (s *Service) Reconcile() error {
 	return s.reconcile()
 }
 
+// reconcile runs PPP before wg-nm: a router moving from L2TP to WireGuard
+// still has its session's nmpppN holding its /32, and its login must be gone
+// and the session ended before wg-nm can route it. A failed wg-nm apply
+// still lets the firewall and forwarding through, so one router's trouble
+// cannot leave the hub unfiltered.
 func (s *Service) reconcile() error {
 	cfg, err := s.st.LoadHubConfig()
 	if err != nil {
@@ -147,22 +153,40 @@ func (s *Service) reconcile() error {
 	if err != nil {
 		return fmt.Errorf("hub: open private key: %w", err)
 	}
+	s.applyPPP(cfg, peers)
 	if err := s.dev.Apply(upConfig(cfg, key)); err != nil {
 		return fmt.Errorf("hub: apply %s: %w", ifaceUp, err)
 	}
-	if err := s.dev.Apply(nmConfig(cfg, key, peers)); err != nil {
-		return fmt.Errorf("hub: apply %s: %w", ifaceNM, err)
+	nmErr := s.dev.Apply(nmConfig(cfg, key, peers))
+	if errors.Is(nmErr, wgdevice.ErrRouteBusy) {
+		// The session's link goes away a moment after it is ended; the next
+		// pass routes the address.
+		slog.Warn("hub: router address still on its PPP link, routed on a later pass", "err", nmErr)
+		nmErr = nil
 	}
-	if err := s.fw.Apply(firewall.RenderHub()); err != nil {
+	if err := s.applyHost(); err != nil {
+		return err
+	}
+	if nmErr != nil {
+		return fmt.Errorf("hub: apply %s: %w", ifaceNM, nmErr)
+	}
+	return nil
+}
+
+// applyHost installs the firewall and turns forwarding on. The PPP rules
+// are installed only on a hub that can serve L2TP: they need kernel modules
+// a WireGuard-only host may lack, and nft rejects the whole table without them.
+func (s *Service) applyHost() error {
+	pppEnabled := s.ppp != nil
+	if err := s.fw.Apply(firewall.RenderHub(pppEnabled)); err != nil {
 		return fmt.Errorf("hub: apply firewall: %w", err)
 	}
-	if err := firewall.EnsureDockerUserAccepts(s.ipt, firewall.HubDockerAccepts); err != nil {
+	if err := firewall.EnsureDockerUserAccepts(s.ipt, firewall.HubDockerAccepts(pppEnabled)); err != nil {
 		return fmt.Errorf("hub: docker forward accepts: %w", err)
 	}
 	if err := s.sysctl(ipForwardKey, "1"); err != nil {
 		return fmt.Errorf("hub: enable forwarding: %w", err)
 	}
-	s.applyPPP(cfg, peers)
 	return nil
 }
 
@@ -180,11 +204,12 @@ func upConfig(cfg store.HubConfig, key string) wgdevice.Config {
 // nmConfig borrows the backhaul address as a /32: the Linux device requires an
 // interface address, and a host route to it cannot shadow any router subnet.
 // Only WireGuard peers belong here; an L2TP router's /32 is routed by the PPP
-// daemon over its pppN, and a wg-nm route for it would take its traffic.
+// daemon over its nmpppN, and a wg-nm route for it would take its traffic.
+// wg-nm yields to such a link while a router's session is being ended.
 func nmConfig(cfg store.HubConfig, key string, peers []store.Peer) wgdevice.Config {
 	c := wgdevice.Config{
 		InterfaceName: ifaceNM, PrivateKey: key, ListenPort: cfg.ListenPort, MTU: nmMTU,
-		Address: netip.PrefixFrom(cfg.BackhaulAddr, 32).String(),
+		Address: netip.PrefixFrom(cfg.BackhaulAddr, 32).String(), YieldTo: ppp.LinkPrefix,
 	}
 	for _, p := range peers {
 		if p.Protocol != routeros.ProtocolWireGuard {

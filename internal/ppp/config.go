@@ -24,15 +24,49 @@ var (
 	PSKRE      = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
 )
 
-// HostSupported reports whether the kernel under root can carry L2TP sessions:
-// accel-ppp needs the /dev/ppp device and the l2tp_ppp module.
+// LinkPrefix names accel-ppp's session links (nmppp0, nmppp1, ...), which is
+// what tells them from a PPP uplink of the host's own.
+const LinkPrefix = "nmppp"
+
+// hostModules are what an L2TP/IPsec session needs from the kernel: accel-ppp
+// the L2TP one, charon ESP and the xfrm netlink interface it installs SAs
+// through. Without either of the last two IKE completes and no packet flows.
+var hostModules = []string{"l2tp_ppp", "esp4", "xfrm_user"}
+
+// HostSupported reports whether the kernel under root can carry L2TP/IPsec
+// sessions: accel-ppp needs the /dev/ppp device, and every module in
+// hostModules must be loaded or built in.
 func HostSupported(root string) bool {
-	for _, p := range []string{"dev/ppp", "sys/module/l2tp_ppp"} {
-		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "dev/ppp")); err != nil {
+		return false
+	}
+	builtin := builtinModules(root)
+	for _, m := range hostModules {
+		if _, err := os.Stat(filepath.Join(root, "sys/module", m)); err != nil && !builtin[m] {
 			return false
 		}
 	}
 	return true
+}
+
+// builtinModules reads the running kernel's modules.builtin. A module built
+// in without parameters has no /sys/module entry, so this is the only trace
+// of it. The file is seldom visible inside the container; a host it is
+// missing on then serves WireGuard only rather than offering a broken L2TP.
+func builtinModules(root string) map[string]bool {
+	release, err := os.ReadFile(filepath.Join(root, "proc/sys/kernel/osrelease"))
+	if err != nil {
+		return nil
+	}
+	list, err := os.ReadFile(filepath.Join(root, "lib/modules", strings.TrimSpace(string(release)), "modules.builtin"))
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, line := range strings.Fields(string(list)) {
+		out[strings.TrimSuffix(filepath.Base(line), ".ko")] = true
+	}
+	return out
 }
 
 // RenderSecrets returns accel-ppp's chap-secrets: one line per L2TP peer,
@@ -128,6 +162,13 @@ charon {
 // outside [client-ip-range], and with 0.0.0.0/0 it disables its guard against
 // tunnelling L2TP to an address inside a PPP session (a kernel soft lockup),
 // so the range is everything but 10.0.0.0/8, where every session address is.
+// LCP echoes every 10 s, three missed, end a dead router's session within
+// about 30 s. The hub stamps an L2TP router as handshaking for as long as its
+// session is up, so a slower timeout would keep the core routing to a hub the
+// router has left past the 60 s failover target. Links are named nmppp%d
+// (LinkPrefix) so the firewall and the session sweep never touch a PPP link
+// of the host's own.
+//
 // The supervisor appends [cli], whose password only it knows.
 func RenderDaemon(gw netip.Addr, secretsPath string) string {
 	return fmt.Sprintf(daemonTemplate, gw, secretsPath)
@@ -154,12 +195,12 @@ mru=1380
 ccp=0
 ipv4=require
 ipv6=deny
-lcp-echo-interval=30
-lcp-echo-failure=4
+lcp-echo-interval=10
+lcp-echo-failure=3
 
 [l2tp]
 verbose=1
-ifname=ppp%%d
+ifname=nmppp%%d
 
 [chap-secrets]
 gw-ip-address=%s
