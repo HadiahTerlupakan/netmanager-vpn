@@ -11,8 +11,22 @@ type Sessions interface {
 	Terminate(addr netip.Addr) error
 }
 
-// terminateCommand is the spike's way to end one session, through the CLI the
-// daemon configuration opens on 127.0.0.1:2001.
-func terminateCommand(addr netip.Addr) Command {
-	return Command{Path: accelCmd, Args: []string{"terminate", "ip", addr.String()}}
+// pppLink is what Live needs to know of one kernel link.
+type pppLink struct {
+	encap       string
+	up          bool
+	local, peer netip.Addr
+}
+
+// livePeers keeps only links that are accel-ppp's: up, of type ppp, and with
+// the hub's gateway address as their local end. Any other PPP link on the
+// host, such as its own PPPoE uplink, is never stamped or terminated.
+func livePeers(links []pppLink, gw netip.Addr) map[netip.Addr]bool {
+	live := map[netip.Addr]bool{}
+	for _, l := range links {
+		if l.encap == "ppp" && l.up && l.local == gw && l.peer.IsValid() {
+			live[l.peer] = true
+		}
+	}
+	return live
 }

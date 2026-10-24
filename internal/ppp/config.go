@@ -128,6 +128,7 @@ charon {
 // outside [client-ip-range], and with 0.0.0.0/0 it disables its guard against
 // tunnelling L2TP to an address inside a PPP session (a kernel soft lockup),
 // so the range is everything but 10.0.0.0/8, where every session address is.
+// The supervisor appends [cli], whose password only it knows.
 func RenderDaemon(gw netip.Addr, secretsPath string) string {
 	return fmt.Sprintf(daemonTemplate, gw, secretsPath)
 }
@@ -167,9 +168,6 @@ chap-secrets=%s
 [log]
 log-file=/dev/stdout
 level=4
-
-[cli]
-tcp=127.0.0.1:2001
 
 [client-ip-range]
 0.0.0.0/5

@@ -15,7 +15,7 @@ type unsupported struct{}
 
 // NewLinuxSessions returns a stand-in that fails every call; the real
 // implementation is in sessions_linux.go.
-func NewLinuxSessions(Runner) Sessions {
+func NewLinuxSessions(netip.Addr, *Supervisor) Sessions {
 	return unsupported{}
 }
 

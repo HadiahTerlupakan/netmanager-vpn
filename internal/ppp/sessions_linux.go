@@ -10,25 +10,28 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-type linuxSessions struct{ run Runner }
-
-// NewLinuxSessions reads sessions from the kernel's PPP interfaces and ends
-// them through run.
-func NewLinuxSessions(run Runner) Sessions {
-	return linuxSessions{run: run}
+type linuxSessions struct {
+	gw  netip.Addr
+	cli *Supervisor
 }
 
-// Live lists the links of type ppp that are up, keyed by their peer address:
-// the session's router end, which chap-secrets bound to its login.
-func (linuxSessions) Live() (map[netip.Addr]bool, error) {
+// NewLinuxSessions reads the sessions whose hub end is gw from the kernel's
+// PPP interfaces and ends them through the supervisor's CLI.
+func NewLinuxSessions(gw netip.Addr, cli *Supervisor) Sessions {
+	return linuxSessions{gw: gw, cli: cli}
+}
+
+// Live keys each session by its peer address: the router end, which
+// chap-secrets bound to its login.
+func (s linuxSessions) Live() (map[netip.Addr]bool, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("ppp: list links: %w", err)
 	}
-	live := map[netip.Addr]bool{}
+	var out []pppLink
 	for _, l := range links {
 		a := l.Attrs()
-		if a.EncapType != "ppp" || a.Flags&net.FlagUp == 0 {
+		if a.EncapType != "ppp" {
 			continue
 		}
 		addrs, err := netlink.AddrList(l, netlink.FAMILY_V4)
@@ -36,17 +39,17 @@ func (linuxSessions) Live() (map[netip.Addr]bool, error) {
 			return nil, fmt.Errorf("ppp: addresses of %s: %w", a.Name, err)
 		}
 		for _, ad := range addrs {
-			if ad.Peer == nil {
-				continue
+			pl := pppLink{encap: a.EncapType, up: a.Flags&net.FlagUp != 0}
+			pl.local, _ = netip.AddrFromSlice(ad.IP.To4())
+			if ad.Peer != nil {
+				pl.peer, _ = netip.AddrFromSlice(ad.Peer.IP.To4())
 			}
-			if p, ok := netip.AddrFromSlice(ad.Peer.IP.To4()); ok {
-				live[p] = true
-			}
+			out = append(out, pl)
 		}
 	}
-	return live, nil
+	return livePeers(out, s.gw), nil
 }
 
 func (s linuxSessions) Terminate(addr netip.Addr) error {
-	return s.run.Run(terminateCommand(addr))
+	return s.cli.Terminate(addr)
 }

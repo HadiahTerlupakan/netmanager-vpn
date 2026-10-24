@@ -98,7 +98,8 @@ func TestSupervisorWritesPrivateFilesAndStartsBoth(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "both children", s.Running)
-	for name, want := range map[string]string{secretsFile: "secrets\n", swanctlFile: "ipsec\n", daemonFile: "daemon\n"} {
+	files := map[string]string{secretsFile: "secrets\n", swanctlFile: "ipsec\n", daemonFile: "daemon\n" + cliSection(s.cliPassword)}
+	for name, want := range files {
 		p := filepath.Join(dir, name)
 		got, err := os.ReadFile(p)
 		if err != nil || string(got) != want {

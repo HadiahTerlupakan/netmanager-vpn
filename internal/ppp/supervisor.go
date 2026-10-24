@@ -1,6 +1,7 @@
 package ppp
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +14,6 @@ const (
 	charonPath  = "/usr/lib/strongswan/charon"
 	swanctlPath = "swanctl"
 	accelPath   = "accel-pppd"
-	accelCmd    = "accel-cmd"
 
 	secretsFile    = "chap-secrets"
 	swanctlFile    = "swanctl.conf"
@@ -39,9 +39,11 @@ type child struct {
 // last given. Processes start on the first Apply, since before that there is
 // nothing to serve.
 type Supervisor struct {
-	dir     string
-	run     Runner
-	backoff time.Duration
+	dir         string
+	run         Runner
+	backoff     time.Duration
+	cliAddr     string
+	cliPassword string // fresh per start; lives only in memory and the 0600 conf
 
 	mu                     sync.Mutex
 	charon, accel          *child
@@ -57,7 +59,8 @@ func NewSupervisor(dir string) *Supervisor {
 }
 
 func newSupervisor(dir string, run Runner, backoff time.Duration) *Supervisor {
-	s := &Supervisor{dir: dir, run: run, backoff: backoff, done: make(chan struct{})}
+	s := &Supervisor{dir: dir, run: run, backoff: backoff, cliAddr: cliAddr, cliPassword: rand.Text(),
+		done: make(chan struct{})}
 	env := []string{"STRONGSWAN_CONF=" + s.path(strongswanFile)}
 	s.charon = &child{cmd: Command{Path: charonPath, Env: env}, ready: s.loadIPsec}
 	s.accel = &child{cmd: Command{Path: accelPath, Args: []string{"-c", s.path(daemonFile)}}}
@@ -119,7 +122,7 @@ func (s *Supervisor) writeAll(secrets, ipsec, daemon string) error {
 		{strongswanFile, strongswanConf, ""},
 		{secretsFile, secrets, s.secrets},
 		{swanctlFile, ipsec, s.ipsec},
-		{daemonFile, daemon, s.daemon},
+		{daemonFile, daemon + cliSection(s.cliPassword), s.daemon + cliSection(s.cliPassword)},
 	}
 	for _, f := range files {
 		if s.started && f.now == f.was {

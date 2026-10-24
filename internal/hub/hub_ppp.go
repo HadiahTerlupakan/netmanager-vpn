@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -17,6 +18,45 @@ type PPPRuntime interface {
 	Apply(secrets, ipsec, daemon string) error
 	Running() bool
 	SecretsPath() string
+}
+
+// applyPPP never fails the reconcile: a broken PPP side must not keep wg-nm
+// from being applied, the API from listening, or the core from pushing the
+// PSK that fixes it. The error names peers and files, never a secret.
+func (s *Service) applyPPP(cfg store.HubConfig, peers []store.Peer) {
+	err := s.reconcilePPP(cfg, peers)
+	s.pppFailed.Store(err != nil)
+	if err != nil {
+		slog.Error("hub: PPP not applied, serving WireGuard only", "err", err)
+	}
+}
+
+// endReplacedLogin ends a session still up on the login an upsert just
+// replaced at the same address; the sweep in reconcilePPP sees only
+// addresses, so it keeps such a session. It runs only after chap-secrets was
+// rewritten, or the router would log in again on the old credentials.
+func (s *Service) endReplacedLogin(prev store.Peer, spec PeerSpec) {
+	if s.sessions == nil || s.pppFailed.Load() || prev.Protocol != routeros.ProtocolL2TP ||
+		spec.Protocol != routeros.ProtocolL2TP || prev.Address != spec.Address {
+		return
+	}
+	if prev.PPPUser == spec.PPPUser {
+		old, err := s.box.Open(prev.PPPPassword)
+		if err == nil && subtle.ConstantTimeCompare([]byte(old), []byte(spec.PPPPassword)) == 1 {
+			return
+		}
+	}
+	live, err := s.sessions.Live()
+	if err != nil {
+		slog.Error("hub: list PPP sessions", "err", err)
+		return
+	}
+	if !live[prev.Address] {
+		return
+	}
+	if err := s.sessions.Terminate(prev.Address); err != nil {
+		slog.Error("hub: end PPP session on replaced login", "addr", prev.Address, "err", err)
+	}
 }
 
 // reconcilePPP hands the daemons their configuration, then ends every session
@@ -68,15 +108,18 @@ func (s *Service) endStraySessions(peers []store.Peer) error {
 	return errors.Join(errs...)
 }
 
-func (s *Service) liveSessions() (map[netip.Addr]bool, error) {
+// liveSessions returns nil when the list cannot be read: L2TP peers then show
+// no handshake, and WireGuard peers are still reported.
+func (s *Service) liveSessions() map[netip.Addr]bool {
 	if s.sessions == nil {
-		return nil, nil
+		return nil
 	}
 	live, err := s.sessions.Live()
 	if err != nil {
-		return nil, fmt.Errorf("hub: list PPP sessions: %w", err)
+		slog.Error("hub: list PPP sessions", "err", err)
+		return nil
 	}
-	return live, nil
+	return live
 }
 
 func stampIf(live bool, now time.Time) *time.Time {
@@ -112,10 +155,11 @@ func (s *Service) SetIPsec(psk, localID string) error {
 }
 
 // Protocols lists what routers can reach this hub with. L2TP counts only once
-// the host has PPP, a PSK is stored, and both daemons are up.
+// the host has PPP, a PSK is stored, the last apply succeeded, and both
+// daemons are up.
 func (s *Service) Protocols() ([]string, error) {
 	out := []string{routeros.ProtocolWireGuard}
-	if s.ppp == nil || !s.ppp.Running() {
+	if s.ppp == nil || s.pppFailed.Load() || !s.ppp.Running() {
 		return out, nil
 	}
 	cfg, err := s.st.LoadHubConfig()

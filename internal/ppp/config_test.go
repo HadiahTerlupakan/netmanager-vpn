@@ -86,12 +86,14 @@ func TestRenderDaemonMatchesSpike(t *testing.T) {
 		"mtu=1380\nmru=1380\nccp=0\nipv4=require\nipv6=deny\nlcp-echo-interval=30\nlcp-echo-failure=4\n",
 		"[l2tp]\nverbose=1\nifname=ppp%d\n",
 		"gw-ip-address=10.99.0.2\nchap-secrets=/run/nmvpn/ppp/chap-secrets\n",
-		"[cli]\ntcp=127.0.0.1:2001\n",
 		"[client-ip-range]\n0.0.0.0/5\n8.0.0.0/7\n11.0.0.0/8\n12.0.0.0/6\n16.0.0.0/4\n32.0.0.0/3\n64.0.0.0/2\n128.0.0.0/1\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "[cli]") {
+		t.Errorf("the supervisor owns [cli], which carries its password:\n%s", got)
 	}
 }
 

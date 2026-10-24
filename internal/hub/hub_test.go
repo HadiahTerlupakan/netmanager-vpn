@@ -210,11 +210,15 @@ type fakePPP struct {
 	applies                int
 	secrets, ipsec, daemon string
 	running                bool
+	err                    error
 }
 
 func (f *fakePPP) Apply(secrets, ipsec, daemon string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
 	f.applies++
 	f.secrets, f.ipsec, f.daemon = secrets, ipsec, daemon
 	return nil
@@ -398,5 +402,98 @@ func TestJoinKeepsStoredIPsec(t *testing.T) {
 	}
 	if cfg.IPsecPSK == "" || cfg.IPsecLocalID != "hub1.example.net" {
 		t.Fatalf("rejoin dropped IPsec: psk set %v, local id %q", cfg.IPsecPSK != "", cfg.IPsecLocalID)
+	}
+}
+
+func TestPPPFailureDoesNotBlockWireGuard(t *testing.T) {
+	e, p := newPPPEnv(t)
+	h := e.svc.Handler("tok")
+	if got := protocolsOf(t, h); got != "wireguard,l2tp" {
+		t.Fatalf("healthy protocols = %s", got)
+	}
+	p.rt.err = errors.New("swanctl: load failed")
+	if err := e.svc.UpsertPeer(wgPeer("wgkey", "10.100.0.10")); err != nil {
+		t.Fatalf("WireGuard upsert failed on a PPP error: %v", err)
+	}
+	if got := nmAllowed(e); len(got) != 1 || got[0] != "10.100.0.10/32" {
+		t.Fatalf("wg-nm allowed IPs = %v", got)
+	}
+	if got := protocolsOf(t, h); got != "wireguard" {
+		t.Fatalf("protocols while PPP fails = %s", got)
+	}
+	p.rt.err = nil
+	if err := e.svc.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if got := protocolsOf(t, h); got != "wireguard,l2tp" {
+		t.Fatalf("protocols after recovery = %s", got)
+	}
+}
+
+func TestUpsertPeerCredentialChangeTerminatesSession(t *testing.T) {
+	for name, changed := range map[string]PeerSpec{
+		"password": {Protocol: "l2tp", PPPUser: "nmvpn-0b", PPPPassword: "newpassnewpassnewpassnew"},
+		"username": {Protocol: "l2tp", PPPUser: "nmvpn-0c", PPPPassword: testPPPPass},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, p := newPPPEnv(t)
+			addr := netip.MustParseAddr("10.100.0.11")
+			if err := e.svc.UpsertPeer(l2tpPeer("key", addr.String(), "nmvpn-0b")); err != nil {
+				t.Fatal(err)
+			}
+			p.sessions.SetLive(addr)
+			changed.PublicKey, changed.Address = "key", addr
+			if err := e.svc.UpsertPeer(changed); err != nil {
+				t.Fatal(err)
+			}
+			if got := p.sessions.Terminated(); len(got) != 1 || got[0] != addr {
+				t.Fatalf("terminated = %v", got)
+			}
+			want := `"` + changed.PPPUser + `" * "` + changed.PPPPassword + `" 10.100.0.11` + "\n"
+			if p.rt.secrets != want {
+				t.Fatalf("chap-secrets = %q", p.rt.secrets)
+			}
+		})
+	}
+}
+
+func TestUpsertPeerCredentialChangeWithoutSessionTerminatesNothing(t *testing.T) {
+	e, p := newPPPEnv(t)
+	if err := e.svc.UpsertPeer(l2tpPeer("key", "10.100.0.11", "nmvpn-0b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.UpsertPeer(l2tpPeer("key", "10.100.0.11", "nmvpn-0c")); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.sessions.Terminated(); len(got) != 0 {
+		t.Fatalf("terminated without a session: %v", got)
+	}
+}
+
+func TestPeerStatusesSurvivesSessionListFailure(t *testing.T) {
+	e, p := newPPPEnv(t)
+	for _, s := range []PeerSpec{l2tpPeer("l2tp", "10.100.0.11", "nmvpn-0b"), wgPeer("wg", "10.100.0.13")} {
+		if err := e.svc.UpsertPeer(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.sessions.SetLive(netip.MustParseAddr("10.100.0.11"))
+	p.sessions.FailLive(errors.New("netlink: permission denied"))
+	hs := e.now.Add(-time.Minute)
+	e.dev.SetStatus([]wgdevice.PeerStatus{{PublicKey: "wg", LastHandshakeAt: &hs}})
+	got, err := e.svc.PeerStatuses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range got {
+		if s.PublicKey == "l2tp" && s.LastHandshakeAt != nil {
+			t.Fatalf("stamped without a session list: %+v", s)
+		}
+		if s.PublicKey == "wg" && s.LastHandshakeAt == nil {
+			t.Fatalf("WireGuard peer lost its handshake: %+v", s)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("statuses = %+v", got)
 	}
 }

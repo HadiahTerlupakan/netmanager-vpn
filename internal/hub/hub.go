@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hadiahterlupakan/netmanager-vpn/internal/firewall"
@@ -56,7 +57,10 @@ type Service struct {
 	// sessions and ppp are both set or both nil.
 	sessions ppp.Sessions
 	ppp      PPPRuntime
-	mu       sync.Mutex
+	// pppFailed is set while the last PPP apply failed; L2TP is then not
+	// offered, and WireGuard carries on regardless.
+	pppFailed atomic.Bool
+	mu        sync.Mutex
 }
 
 // PeerStatus is a router peer with its live counters. The JSON shape is relied
@@ -158,7 +162,8 @@ func (s *Service) reconcile() error {
 	if err := s.sysctl(ipForwardKey, "1"); err != nil {
 		return fmt.Errorf("hub: enable forwarding: %w", err)
 	}
-	return s.reconcilePPP(cfg, peers)
+	s.applyPPP(cfg, peers)
+	return nil
 }
 
 func upConfig(cfg store.HubConfig, key string) wgdevice.Config {
@@ -209,7 +214,8 @@ type PeerSpec struct {
 // UpsertPeer records a router and applies it. The check and the write share
 // one lock so two concurrent requests cannot both claim an address. A session
 // the change leaves without a login, as when the router moves to WireGuard,
-// is ended by the reconcile.
+// is ended by the reconcile; one on replaced credentials at the same address
+// is ended after it.
 func (s *Service) UpsertPeer(spec PeerSpec) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,9 +223,13 @@ func (s *Service) UpsertPeer(spec PeerSpec) error {
 	if err != nil {
 		return err
 	}
+	var prev store.Peer
 	for _, p := range peers {
 		if p.Address == spec.Address && p.PublicKey != spec.PublicKey {
 			return ErrAddressInUse
+		}
+		if p.PublicKey == spec.PublicKey {
+			prev = p
 		}
 	}
 	peer := store.Peer{PublicKey: spec.PublicKey, Address: spec.Address, Protocol: spec.Protocol, PPPUser: spec.PPPUser}
@@ -231,7 +241,11 @@ func (s *Service) UpsertPeer(spec PeerSpec) error {
 	if err := s.st.UpsertPeer(peer); err != nil {
 		return err
 	}
-	return s.reconcile()
+	if err := s.reconcile(); err != nil {
+		return err
+	}
+	s.endReplacedLogin(prev, spec)
+	return nil
 }
 
 // DeletePeer removes a router and applies the change, ending its PPP session.
@@ -256,10 +270,7 @@ func (s *Service) PeerStatuses() ([]PeerStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := s.liveSessions()
-	if err != nil {
-		return nil, err
-	}
+	sessions := s.liveSessions()
 	now := s.now()
 	byKey := make(map[string]wgdevice.PeerStatus, len(live))
 	for _, l := range live {

@@ -10,6 +10,7 @@ import (
 type MemorySessions struct {
 	mu         sync.Mutex
 	live       map[netip.Addr]bool
+	liveErr    error
 	terminated []netip.Addr
 }
 
@@ -28,10 +29,20 @@ func (m *MemorySessions) SetLive(addrs ...netip.Addr) {
 	}
 }
 
+// FailLive makes Live return err; nil restores it.
+func (m *MemorySessions) FailLive(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.liveErr = err
+}
+
 // Live returns a copy of the live sessions.
 func (m *MemorySessions) Live() (map[netip.Addr]bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.liveErr != nil {
+		return nil, m.liveErr
+	}
 	out := make(map[netip.Addr]bool, len(m.live))
 	for a := range m.live {
 		out[a] = true

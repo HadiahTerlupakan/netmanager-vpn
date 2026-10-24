@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -29,7 +30,7 @@ const (
 	pppDir = "/run/netmanager-vpn/ppp"
 )
 
-func newHub(cfg config, opts hub.Options) (*hub.Service, *store.Store, error) {
+func openHub(cfg config) (*secret.Box, *store.Store, error) {
 	box, err := secret.NewBox(cfg.EncryptionKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("NMVPN_ENCRYPTION_KEY: %w", err)
@@ -38,19 +39,20 @@ func newHub(cfg config, opts hub.Options) (*hub.Service, *store.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, opts), st, nil
+	return box, st, nil
 }
 
 // pppOptions wires L2TP/IPsec when the kernel can carry it; otherwise the hub
-// serves WireGuard alone and reports only that to the core.
-func pppOptions() (hub.Options, *ppp.Supervisor) {
+// serves WireGuard alone and reports only that to the core. gw is the hub's
+// end of every session, which tells its sessions from other PPP links.
+func pppOptions(gw netip.Addr) (hub.Options, *ppp.Supervisor) {
 	if !ppp.HostSupported("/") {
 		slog.Info("hub serves WireGuard only: /dev/ppp or the l2tp_ppp module is missing")
 		return hub.Options{}, nil
 	}
 	slog.Info("hub serves WireGuard and L2TP/IPsec")
 	sup := ppp.NewSupervisor(pppDir)
-	return hub.Options{Sessions: ppp.NewLinuxSessions(ppp.ExecRunner{}), PPP: sup}, sup
+	return hub.Options{Sessions: ppp.NewLinuxSessions(gw, sup), PPP: sup}, sup
 }
 
 // readBundle returns arg, or the bundle read from stdin when arg is "-": an
@@ -84,20 +86,16 @@ func joinHub(arg string, stdin io.Reader) error {
 	}
 	// WireGuard-only: this process exits right after, and would leave any
 	// daemon it started behind. `hub run` starts them.
-	svc, st, err := newHub(cfg, hub.Options{})
+	box, st, err := openHub(cfg)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	return svc.Join(b)
+	return hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, hub.Options{}).Join(b)
 }
 
 func runHub(ctx context.Context, cfg config) error {
-	opts, sup := pppOptions()
-	if sup != nil {
-		defer sup.Close()
-	}
-	svc, st, err := newHub(cfg, opts)
+	box, st, err := openHub(cfg)
 	if err != nil {
 		return err
 	}
@@ -109,6 +107,11 @@ func runHub(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	opts, sup := pppOptions(hubCfg.BackhaulAddr)
+	if sup != nil {
+		defer sup.Close()
+	}
+	svc := hub.New(wgdevice.NewLinux(), st, firewall.NewNft(), box, opts)
 	if !reconcileUntilOK(ctx, svc) {
 		return nil
 	}
