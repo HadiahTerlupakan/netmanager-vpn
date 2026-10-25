@@ -151,3 +151,26 @@ func TestHubAntiSpoofLivesOnlyInPrerouting(t *testing.T) {
 		}
 	}
 }
+
+// Routers reach the isolir page on 10.99.0.1 through the hub and core, and
+// only that port pair: the hub's SYN drop must come after the accept.
+func TestIsolirPortsOpenOnlyToCore(t *testing.T) {
+	for _, ppp := range []bool{false, true} {
+		rs := RenderHub(ppp)
+		iface := "wg-nm"
+		if ppp {
+			iface = "nmppp*"
+		}
+		accept := strings.Index(rs, `iifname "`+iface+`" oifname "wg-up" ip daddr 10.99.0.1 tcp dport { 30880, 30443 } accept`)
+		drop := strings.Index(rs, `iifname "`+iface+`" tcp flags & (syn | ack) == syn drop`)
+		if accept < 0 || drop < 0 || accept > drop {
+			t.Errorf("ppp=%v: isolir accept must precede the SYN drop (accept=%d drop=%d)", ppp, accept, drop)
+		}
+	}
+	rs := RenderCore()
+	accept := strings.Index(rs, `iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 tcp dport { 30880, 30443 } accept`)
+	drop := strings.Index(rs, `iifname "wg-core" drop`)
+	if accept < 0 || drop < 0 || accept > drop {
+		t.Errorf("core isolir accept must precede wg-core drop (accept=%d drop=%d)", accept, drop)
+	}
+}
