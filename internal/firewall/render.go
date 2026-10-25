@@ -40,6 +40,7 @@ const (
 		type filter hook forward priority 0; policy accept;
 `
 	hubForwardWG = `		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 tcp dport { 30880, 30443 } accept
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
 		iifname "wg-nm" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
 		iifname "wg-nm" tcp flags & (syn | ack) == syn drop
@@ -49,6 +50,7 @@ const (
 		iifname "wg-up" oifname "wg-nm" drop
 `
 	hubForwardPPP = `		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.0.1 tcp dport { 30880, 30443 } accept
 		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
 		iifname "nmppp*" oifname "wg-up" ip daddr 10.99.128.0/24 icmp type echo-reply accept
 		iifname "nmppp*" tcp flags & (syn | ack) == syn drop
@@ -84,6 +86,7 @@ const (
 		type filter hook prerouting priority -150; policy accept;
 		iifname "wg-core" ct state established,related accept
 		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 udp dport { 30812, 30813 } accept
+		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 tcp dport { 30880, 30443 } accept
 		iifname "wg-core" ip saddr 10.100.0.0/14 ip daddr 10.99.0.1 icmp type { echo-request, echo-reply } accept
 		iifname "wg-core" ip saddr 10.99.128.0/24 ip daddr 10.100.0.0/14 accept
 		iifname "wg-core" drop
@@ -105,8 +108,8 @@ func RenderHub(pppEnabled bool) string {
 }
 
 // RenderCore returns the core ruleset: the control port answers only the
-// local host and the pod network, and wg-core admits only router RADIUS and
-// ping to the core and admin traffic to routers.
+// local host and the pod network, and wg-core admits only router RADIUS, the
+// isolir page and ping to the core, plus admin traffic to routers.
 func RenderCore() string {
 	return preamble + coreInput + coreWgIn + postamble
 }
