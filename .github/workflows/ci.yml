@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# Tests and image builds only read the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
